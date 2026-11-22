@@ -25,11 +25,14 @@ import {
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
+import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -108,6 +111,36 @@ function dateTime(value: string): DateTime.Utc {
 type HistoryMessage = Omit<AgentSessionScanner.AgentSessionThreadMessage, "role"> & {
   readonly role: AgentSessionScanner.AgentSessionThreadMessage["role"] | "reasoning";
 };
+
+function appendedHistory(
+  stored: readonly OrchestrationV2ConversationMessage[],
+  thread: AgentSessionScanner.AgentSessionThread,
+): readonly AgentSessionScanner.AgentSessionThreadMessage[] | null {
+  if (stored.length === 0) return null;
+  // A capped transcript retains the first user prompt separately from its contiguous tail.
+  const tail = thread.omittedMessageCount > 0 ? thread.messages.slice(1) : thread.messages;
+  for (let end = tail.length - 1; end >= 0; end--) {
+    let previous = stored.length - 1;
+    let incoming = end;
+    while (previous >= 0 && incoming >= 0) {
+      const left = stored[previous]!;
+      const right = tail[incoming]!;
+      if (
+        left.role !== right.role ||
+        left.text !== right.text ||
+        DateTime.toEpochMillis(left.createdAt) !== Date.parse(right.createdAt)
+      ) {
+        break;
+      }
+      previous--;
+      incoming--;
+    }
+    if (previous < 0 || (incoming < 0 && thread.omittedMessageCount > 0)) {
+      return tail.slice(end + 1);
+    }
+  }
+  return null;
+}
 
 function messageEvents(input: {
   readonly threadId: ThreadId;
@@ -206,7 +239,7 @@ const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const ceiling = settingsService.managedPolicy?.limits?.maxRuntimeMode;
   const importRecentAgentThreads = Effect.fn("importRecentAgentThreadsV2")(function* (
-    input: AgentSessionImportInput,
+    input: AgentSessionImportInput & { readonly sync?: boolean },
   ) {
     const project = yield* projects.getById(input.projectId).pipe(
       Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
@@ -321,7 +354,10 @@ const make = Effect.gen(function* () {
             { onConflict: "ignore" },
           );
           const existing = yield* Effect.option(
-            orchestrator.getThreadRecords(threadId, ["messages"]),
+            orchestrator.getThreadRecords(
+              threadId,
+              input.sync ? ["messages", "runs"] : ["messages"],
+            ),
           );
           if (Option.isSome(existing)) {
             if (existing.value.thread.projectId !== input.projectId) {
@@ -337,6 +373,47 @@ const make = Effect.gen(function* () {
             // A transcript can change after the import, so record it only when the
             // thread already holds exactly its messages.
             const stored = existing.value.messages;
+            if (input.sync) {
+              const current = existing.value.thread;
+              if (current.archivedAt !== null || existing.value.runs.length > 0) return null;
+              const appended = appendedHistory(stored, thread);
+              if (appended === null) return false;
+              if (appended.length > 0) {
+                const updatedAt = dateTime(thread.updatedAt);
+                yield* eventSink.write({
+                  events: [
+                    ...appended.flatMap((message, index) =>
+                      messageEvents({ threadId, index: stored.length + index, message }),
+                    ),
+                    {
+                      id: EventId.make(
+                        `${IMPORT_EVENT_PREFIX}:thread:${threadId}:sync:${stored.length + appended.length}`,
+                      ),
+                      type: "thread.metadata-updated",
+                      threadId,
+                      providerInstanceId: current.providerInstanceId,
+                      occurredAt: updatedAt,
+                      payload: {
+                        ...current,
+                        updatedAt:
+                          DateTime.toEpochMillis(updatedAt) >
+                          DateTime.toEpochMillis(current.updatedAt)
+                            ? updatedAt
+                            : current.updatedAt,
+                      },
+                    },
+                  ],
+                });
+                yield* Effect.logDebug("Local agent history appended", {
+                  provider: thread.source,
+                  messageCount: appended.length,
+                });
+              }
+              yield* persistRuntime;
+              yield* runtimes.recordImportedTranscript({ threadId, source });
+              importedThreadIds.add(threadId);
+              return null;
+            }
             if (
               stored.length !== thread.messages.length ||
               stored.some(
@@ -478,6 +555,7 @@ const make = Effect.gen(function* () {
           yield* runtimes.recordImportedTranscript({ threadId, source });
           return true;
         }).pipe(
+          (work) => threadCommands.withLock(threadId, work),
           Effect.catch((cause) =>
             Effect.logWarning("Could not import an agent session", {
               provider: outcome.thread.source,
@@ -497,6 +575,53 @@ const make = Effect.gen(function* () {
 
     return { importedCount, skippedCount } satisfies AgentSessionImportResult;
   });
+
+  const syncLocalAgentSessions = Effect.gen(function* () {
+    const { candidates } = yield* scanner.scan;
+    const results = yield* Effect.forEach(candidates, (candidate) =>
+      Effect.gen(function* () {
+        const projectId =
+          candidate.projectId ??
+          (yield* projects.bootstrap({
+            commandId: yield* idAllocator.allocate.command({
+              fixtureName: "local-agent-sync",
+              commandName: "project.create",
+            }),
+            projectId: yield* idAllocator.allocate.project({ fixtureName: "local-agent-sync" }),
+            title: candidate.title,
+            workspaceRoot: candidate.path,
+          })).project.id;
+        return yield* importRecentAgentThreads({
+          projectId,
+          expectedWorkspaceRoot: candidate.path,
+          sync: true,
+        });
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Local agent sync could not read a project", {
+            error: error._tag,
+          }).pipe(Effect.as({ importedCount: 0, skippedCount: 1 })),
+        ),
+      ),
+    );
+    yield* Effect.logInfo("Local agent sync finished", {
+      projects: candidates.length,
+      imported: results.reduce((total, result) => total + result.importedCount, 0),
+      skipped: results.reduce((total, result) => total + result.skippedCount, 0),
+    });
+  });
+
+  const syncIntervalSeconds = yield* Config.Int("T3CODE_LOCAL_AGENT_SYNC_SECONDS").pipe(
+    Config.withDefault(0),
+  );
+  if (syncIntervalSeconds > 0) {
+    yield* Effect.forkScoped(
+      syncLocalAgentSessions.pipe(
+        Effect.catchCause(() => Effect.logWarning("Local agent sync failed")),
+        Effect.repeat(Schedule.spaced(Duration.seconds(syncIntervalSeconds))),
+      ),
+    );
+  }
 
   /**
    * Loading a native session replays its history only into the adapter's own

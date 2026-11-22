@@ -279,10 +279,59 @@ const makeImporter = Effect.fn(function* (
   const importer = Context.get(context, AgentSessionImporter.AgentSessionImporter);
   return {
     run: importer.importRecentAgentThreads({ projectId }),
+    sync: importer.importRecentAgentThreads({ projectId, sync: true }),
     importNativeHistory: importer.importNativeHistory,
     published,
   };
 });
+
+it.effect("appends only new messages to imported Codex, Claude and Pi threads", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sources = [
+      candidate(CODEX_MODEL_SELECTION, "sync-codex"),
+      candidate(CLAUDE_MODEL_SELECTION, "020e7f00-dce6-406b-8ec6-ed90498945d6", "claudeAgent"),
+      candidate(PI_MODEL_SELECTION, "sync-pi", "pi"),
+    ];
+    expect((yield* (yield* makeImporter(sources)).run).importedCount).toBe(3);
+    const nextAt = "2026-09-01T10:05:00.000Z";
+    const changed = sources.map((item) => ({
+      ...item,
+      source: { ...item.source, size: 300, mtimeMs: 3 },
+      thread: {
+        ...item.thread,
+        updatedAt: nextAt,
+        // The previous answer is now the start of the parser's contiguous tail.
+        omittedMessageCount: 1,
+        messages: [
+          ...item.thread.messages,
+          { role: "user" as const, text: "Follow up", createdAt: nextAt },
+        ],
+      },
+    }));
+    const syncer = yield* makeImporter(changed);
+    expect(yield* syncer.sync).toEqual({ importedCount: 0, skippedCount: 0 });
+    expect(yield* syncer.sync).toEqual({ importedCount: 0, skippedCount: 0 });
+    for (const source of sources) {
+      const records = yield* projections.getThreadRecords(importId(source), ["messages", "runs"]);
+      expect(records.messages.map(({ text }) => text)).toEqual(["Fix it", "Fixed", "Follow up"]);
+      expect(records.runs).toEqual([]);
+      expect(records.thread.settledOverride).toBe("settled");
+    }
+    const rewritten = yield* makeImporter([
+      {
+        ...changed[0]!,
+        thread: {
+          ...changed[0]!.thread,
+          messages: [{ role: "user", text: "Unrelated branch", createdAt: nextAt }],
+        },
+      },
+    ]);
+    expect(yield* rewritten.sync).toEqual({ importedCount: 0, skippedCount: 1 });
+    const records = yield* projections.getThreadRecords(importId(sources[0]!), ["messages"]);
+    expect(records.messages.map(({ text }) => text)).toEqual(["Fix it", "Fixed", "Follow up"]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
 
 it.effect(
   "ignores owned sessions, including archived and deleted threads, but imports other instances and unowned sessions",
