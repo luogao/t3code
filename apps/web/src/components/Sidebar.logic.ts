@@ -1465,6 +1465,31 @@ export function sortSidebarV2ProjectGroups<
   );
 }
 
+export interface SidebarAgentProviderEntry {
+  readonly driverKind: string;
+  readonly displayName: string;
+  readonly acpRegistryAgentId?: string | undefined;
+}
+
+export function matchesSidebarAgent(input: {
+  readonly agent: "all" | "codex" | "pi" | "antigravity" | "hermes";
+  readonly instanceId: string;
+  readonly providerEntry: SidebarAgentProviderEntry | undefined;
+}): boolean {
+  if (input.agent === "all") return true;
+  if (input.agent === "hermes") {
+    if (input.providerEntry !== undefined && input.providerEntry.driverKind !== "acpRegistry") {
+      return false;
+    }
+    return [
+      input.instanceId,
+      input.providerEntry?.displayName,
+      input.providerEntry?.acpRegistryAgentId,
+    ].some((candidate) => candidate !== undefined && /hermes/i.test(candidate));
+  }
+  return (input.providerEntry?.driverKind ?? input.instanceId) === input.agent;
+}
+
 export function sortScopedProjectsForSidebar<
   TProject extends ScopedSidebarProject,
   TThread extends ScopedSidebarThread,

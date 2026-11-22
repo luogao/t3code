@@ -516,6 +516,13 @@ it.each([false, true])(
         providerInstanceId: ProviderInstanceId.make("antigravity"),
         title: "Antigravity work",
       }),
+      makeThreadFixture({
+        environmentId: activeProject.environmentId,
+        projectId: activeProject.id,
+        id: ThreadId.make("hermes-work"),
+        providerInstanceId: ProviderInstanceId.make("hermes"),
+        title: "Hermes work",
+      }),
     ];
     const routeThreadRef = { environmentId: activeProject.environmentId, threadId: threads[0]!.id };
     vi.mocked(useProjects).mockReturnValue([activeProject, historyProject]);
@@ -568,6 +575,7 @@ it.each([false, true])(
     await expect.element(screen.getByText("Pi history").first()).toBeInTheDocument();
     await expect.element(screen.getByText("Claude work").first()).toBeInTheDocument();
     await expect.element(screen.getByText("Antigravity work").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Hermes work").first()).toBeInTheDocument();
     if (grouped) {
       const pi = screen.getByText("Pi history").first().element();
       const codex = screen.getByText("Thread 1").first().element();
@@ -590,11 +598,18 @@ it.each([false, true])(
 
     await filters.getByRole("button", { name: "Antigravity", exact: true }).click();
     await expect.element(screen.getByText("Antigravity work").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Hermes work").first()).not.toBeInTheDocument();
+    await expect.element(screen.getByText("Claude work").first()).not.toBeInTheDocument();
+
+    await filters.getByRole("button", { name: "Hermes", exact: true }).click();
+    await expect.element(screen.getByText("Hermes work").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Antigravity work").first()).not.toBeInTheDocument();
     await expect.element(screen.getByText("Claude work").first()).not.toBeInTheDocument();
 
     await filters.getByRole("button", { name: "Codex", exact: true }).click();
     await expect.element(screen.getByText("Thread 1").first()).toBeInTheDocument();
     await expect.element(screen.getByText("Codex history").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Hermes work").first()).not.toBeInTheDocument();
     await expect.element(screen.getByText("Claude work").first()).not.toBeInTheDocument();
 
     await filters.getByRole("button", { name: "All agents", exact: true }).click();

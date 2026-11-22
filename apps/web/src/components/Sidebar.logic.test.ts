@@ -8,6 +8,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import {
   shouldCreateNewThreadInCurrentProject,
+  matchesSidebarAgent,
   resolveScopedNewThreadProjectRef,
   deleteSelectedThreadEntries,
   getFallbackThreadIdAfterDelete,
@@ -1809,5 +1810,59 @@ describe("resolveScopedNewThreadProjectRef", () => {
         viewed: viewedWeb,
       }),
     ).toBeNull();
+  });
+});
+
+describe("matchesSidebarAgent", () => {
+  it("matches local ACP Hermes instances even when driverKind is acpRegistry", () => {
+    expect(
+      matchesSidebarAgent({
+        agent: "hermes",
+        instanceId: "hermes",
+        providerEntry: { driverKind: "acpRegistry", displayName: "Hermes" },
+      }),
+    ).toBe(true);
+    expect(
+      matchesSidebarAgent({
+        agent: "hermes",
+        instanceId: "acp-macmini",
+        providerEntry: { driverKind: "acpRegistry", displayName: "Hermes Agent" },
+      }),
+    ).toBe(true);
+    expect(
+      matchesSidebarAgent({
+        agent: "hermes",
+        instanceId: "hermes",
+        providerEntry: undefined,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match other ACP providers or non-ACP drivers under the Hermes filter", () => {
+    expect(
+      matchesSidebarAgent({
+        agent: "hermes",
+        instanceId: "devin",
+        providerEntry: {
+          driverKind: "acpRegistry",
+          displayName: "Devin",
+          acpRegistryAgentId: "devin",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      matchesSidebarAgent({
+        agent: "hermes",
+        instanceId: "codex-hermes",
+        providerEntry: { driverKind: "codex", displayName: "Hermes Codex" },
+      }),
+    ).toBe(false);
+    expect(
+      matchesSidebarAgent({
+        agent: "codex",
+        instanceId: "hermes",
+        providerEntry: { driverKind: "acpRegistry", displayName: "Hermes" },
+      }),
+    ).toBe(false);
   });
 });

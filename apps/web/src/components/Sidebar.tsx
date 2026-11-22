@@ -197,6 +197,7 @@ import {
   planSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
+  matchesSidebarAgent,
   resolveSidebarSweepKeys,
   resolveSidebarDropTarget,
   resolveSidebarDropVerb,
@@ -234,6 +235,7 @@ import {
 } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
+import hermesLogo from "./mcp/logos/hermes.png";
 import { deriveProviderEntriesByEnvironment } from "../providerInstances";
 import { useStableCallback } from "../hooks/useStableCallback";
 import {
@@ -343,6 +345,8 @@ const SIDEBAR_AGENTS = [
   { value: "codex", label: "Codex" },
   { value: "pi", label: "Pi" },
   { value: "antigravity", label: "Antigravity" },
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- Hermes is a proper brand name.
+  { value: "hermes", label: "Hermes" },
 ] as const;
 
 const SidebarAgent = Schema.Literals(SIDEBAR_AGENTS.map(({ value }) => value));
@@ -351,6 +355,16 @@ type SidebarAgent = typeof SidebarAgent.Type;
 function SidebarAgentIcon({ value }: { value: SidebarAgent }) {
   if (value === "all") {
     return <ListFilterIcon className="size-4" aria-hidden />;
+  }
+  if (value === "hermes") {
+    return (
+      <img
+        src={hermesLogo}
+        alt=""
+        aria-hidden
+        className="size-4 rounded-xs object-cover ring-1 ring-black/10 dark:ring-white/15"
+      />
+    );
   }
   return (
     <ProviderInstanceIcon
@@ -1401,12 +1415,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectScopeKey,
     agent: sidebarAgent,
     matchesAgent: (thread) => {
-      if (sidebarAgent === "all") return true;
       const instanceId = thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
-      const driver = providerEntriesByEnvironment
-        .get(thread.environmentId)
-        ?.get(instanceId)?.driverKind;
-      return (driver ?? instanceId) === sidebarAgent;
+      const providerEntry = providerEntriesByEnvironment.get(thread.environmentId)?.get(instanceId);
+      return matchesSidebarAgent({
+        agent: sidebarAgent,
+        instanceId,
+        providerEntry,
+      });
     },
     scopedProjectKeys,
     serverConfigs,
@@ -3348,7 +3363,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               <div
                 role="group"
                 aria-label={gt("Filter threads by agent")}
-                className="grid grid-cols-4 gap-0.5 rounded-md bg-sidebar-control-surface p-0.5"
+                className="grid grid-cols-5 gap-0.5 rounded-md bg-sidebar-control-surface p-0.5"
               >
                 {SIDEBAR_AGENTS.map(({ value, label }) => {
                   const resolvedLabel = typeof label === "string" ? label : messages(label);
