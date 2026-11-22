@@ -9,6 +9,7 @@ import {
   EnvironmentId,
   type LocalApi,
   ProjectId,
+  ProviderInstanceId,
   ThreadId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -462,3 +463,146 @@ describe("sidebar settled pagination", () => {
     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
   });
 });
+
+it.each([false, true])(
+  "filters active and settled rows by agent with project folders set to %s",
+  async (grouped) => {
+    using stack = new DisposableStack();
+    const previousSettings = getClientSettings();
+    stack.defer(() => __setClientSettingsForTests(previousSettings));
+    __setClientSettingsForTests({ ...previousSettings, boringSidebarEnabled: grouped });
+    const storageKey = "t3code:sidebar:agent";
+    const previousFilter = localStorage.getItem(storageKey);
+    localStorage.removeItem(storageKey);
+    stack.defer(() => {
+      if (previousFilter === null) localStorage.removeItem(storageKey);
+      else localStorage.setItem(storageKey, previousFilter);
+    });
+    const activeProject = project("active");
+    const historyProject = project("history-only");
+    const threads = [
+      { ...threadShell(activeProject.id, 1), latestMessageAt: "2026-01-04T00:00:00Z" },
+      {
+        ...makeThreadFixture({
+          environmentId: activeProject.environmentId,
+          projectId: activeProject.id,
+          id: ThreadId.make("pi-history"),
+          providerInstanceId: ProviderInstanceId.make("pi"),
+          title: "Pi history",
+          settledOverride: "settled",
+          settledAt: "2026-01-01T00:00:00.000Z",
+        }),
+        latestMessageAt: "2026-01-05T00:00:00Z",
+      },
+      makeThreadFixture({
+        environmentId: activeProject.environmentId,
+        projectId: historyProject.id,
+        id: ThreadId.make("codex-history"),
+        title: "Codex history",
+        settledOverride: "settled",
+        settledAt: "2026-01-01T00:00:00.000Z",
+      }),
+      makeThreadFixture({
+        environmentId: activeProject.environmentId,
+        projectId: activeProject.id,
+        id: ThreadId.make("claude-work"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        title: "Claude work",
+      }),
+      makeThreadFixture({
+        environmentId: activeProject.environmentId,
+        projectId: activeProject.id,
+        id: ThreadId.make("antigravity-work"),
+        providerInstanceId: ProviderInstanceId.make("antigravity"),
+        title: "Antigravity work",
+      }),
+    ];
+    const routeThreadRef = { environmentId: activeProject.environmentId, threadId: threads[0]!.id };
+    vi.mocked(useProjects).mockReturnValue([activeProject, historyProject]);
+    vi.mocked(useQuietThreadShells).mockReturnValue(threads);
+    vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef: routeThreadRef });
+    vi.mocked(useHandleNewThread).mockReturnValue({
+      activeDraftThread: null,
+      activeThread: null,
+      defaultProjectRef: {
+        environmentId: activeProject.environmentId,
+        projectId: activeProject.id,
+      },
+      defaultProjectFallbackReady: true,
+      handleNewThread: vi.fn().mockResolvedValue(null),
+      routeDraftId: null,
+      routeThreadRef,
+    });
+    vi.mocked(useServerConfigs).mockReturnValue(
+      new Map([
+        [
+          activeProject.environmentId,
+          {
+            scratchWorkspaceRoot: null,
+            shellThreadFamilies: false,
+          } as unknown as EnvironmentServerConfig,
+        ],
+      ]),
+    );
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const filters = screen.getByRole("group", { name: "Filter threads by agent" });
+    const settled = screen.getByTestId("sidebar-settled-shelf-toggle");
+    if (grouped) {
+      await expect.element(settled).not.toBeInTheDocument();
+      const historyFolder = screen.getByRole("button", { name: "history-only", exact: true });
+      await expect.element(historyFolder).toHaveAttribute("aria-expanded", "true");
+      const parent = historyFolder.element().getAttribute("data-sidebar-row");
+      const historyRow = screen.getByText("Codex history").first();
+      await expect.element(historyRow).toBeInTheDocument();
+      expect(
+        historyRow.element().closest("[data-sidebar-parent]")?.getAttribute("data-sidebar-parent"),
+      ).toBe(parent);
+    } else if (settled.element().getAttribute("aria-expanded") === "false") {
+      await settled.click();
+    }
+    await expect.element(screen.getByText("Thread 1").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Pi history").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Claude work").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Antigravity work").first()).toBeInTheDocument();
+    if (grouped) {
+      const pi = screen.getByText("Pi history").first().element();
+      const codex = screen.getByText("Thread 1").first().element();
+      expect(pi.compareDocumentPosition(codex) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    if (!grouped) {
+      await settled.click();
+      await expect.element(screen.getByText("Pi history").first()).not.toBeInTheDocument();
+    }
+
+    await filters.getByRole("button", { name: "Pi", exact: true }).click();
+    await expect.element(screen.getByText("Pi history").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Codex history").first()).not.toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 1").first()).not.toBeInTheDocument();
+    await expect.element(screen.getByText("Claude work").first()).not.toBeInTheDocument();
+
+    await expect
+      .element(filters.getByRole("button", { name: "Claude", exact: true }))
+      .not.toBeInTheDocument();
+
+    await filters.getByRole("button", { name: "Antigravity", exact: true }).click();
+    await expect.element(screen.getByText("Antigravity work").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Claude work").first()).not.toBeInTheDocument();
+
+    await filters.getByRole("button", { name: "Codex", exact: true }).click();
+    await expect.element(screen.getByText("Thread 1").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Codex history").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Claude work").first()).not.toBeInTheDocument();
+
+    await filters.getByRole("button", { name: "All agents", exact: true }).click();
+    if (!grouped) {
+      await expect.element(settled).toHaveAttribute("aria-expanded", "false");
+      await settled.click();
+    }
+    await expect.element(screen.getByText("Pi history").first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Claude work").first()).toBeInTheDocument();
+  },
+);

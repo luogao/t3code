@@ -1,8 +1,13 @@
-import { ClientSettingsSchema, type ClientSettings } from "@t3tools/contracts";
+import {
+  ClientSettingsSchema,
+  DEFAULT_CLIENT_SETTINGS,
+  type ClientSettings,
+} from "@t3tools/contracts";
 
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
-const CLIENT_SETTINGS_STORAGE_KEY = "t3code:client-settings:v1";
+const LEGACY_CLIENT_SETTINGS_STORAGE_KEY = "t3code:client-settings:v1";
+const CLIENT_SETTINGS_STORAGE_KEY = "t3code:client-settings:v2";
 
 function hasWindow(): boolean {
   return typeof window !== "undefined";
@@ -13,7 +18,13 @@ export function readBrowserClientSettings(): ClientSettings | null {
     return null;
   }
 
-  return getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema);
+  return (
+    getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema) ?? {
+      ...(getLocalStorageItem(LEGACY_CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema) ??
+        DEFAULT_CLIENT_SETTINGS),
+      boringSidebarEnabled: true,
+    }
+  );
 }
 
 export function writeBrowserClientSettings(settings: ClientSettings): void {
@@ -30,7 +41,11 @@ export function subscribeBrowserClientSettingsWrites(onChange: () => void): () =
     return () => undefined;
   }
   const handleStorage = (event: StorageEvent) => {
-    if (event.key === CLIENT_SETTINGS_STORAGE_KEY || event.key === null) {
+    if (
+      event.key === CLIENT_SETTINGS_STORAGE_KEY ||
+      event.key === LEGACY_CLIENT_SETTINGS_STORAGE_KEY ||
+      event.key === null
+    ) {
       onChange();
     }
   };
