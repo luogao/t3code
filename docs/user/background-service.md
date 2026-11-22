@@ -42,6 +42,15 @@ downloaded versions after showing you the list and asking once. Your projects,
 threads, and settings under `~/.t3/userdata` are kept, along with `service.env`
 under T3 home. Pass `--yes` from a script.
 
+## Sync local agent conversations
+
+Set `T3CODE_LOCAL_AGENT_SYNC_SECONDS=300` in the environment's `service.env`
+and restart the background service to check local Codex, Pi, and Claude Code
+conversation files every five minutes. Each check imports supported new
+conversations and appends matching new messages to previously imported
+conversations. Connected clients read the same history. Set the value to `0`
+and restart the service to pause the sync.
+
 ## Local network access
 
 A new service answers only on this machine. Other devices reach it through

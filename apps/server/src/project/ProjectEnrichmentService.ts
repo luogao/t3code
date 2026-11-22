@@ -25,6 +25,7 @@ const DEFAULT_FAILURE_TTL = Duration.seconds(5);
 
 export interface ProjectEnrichment {
   readonly repositoryIdentity: RepositoryIdentity | null;
+  readonly localRepositoryRoot?: string | null;
   readonly faviconPath: string | null;
   readonly repositoryIdentityResolved: boolean;
 }
@@ -94,20 +95,23 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
 
   // Outlives the cache entry so an expired or refreshing identity still reads as its last value.
-  const lastRepositoryIdentities = new Map<string, RepositoryIdentity>();
+  const lastRepositoryIdentities = new Map<
+    string,
+    RepositoryIdentityResolver.RepositoryGroupingMetadata
+  >();
   // `invalidate` drops a root's in-flight lookup so its late result cannot overwrite a newer one.
   const lookupsInFlight = new Map<string, object>();
   const rememberRepositoryIdentity = (
     workspaceRoot: string,
-    repositoryIdentity: RepositoryIdentity | null,
+    metadata: RepositoryIdentityResolver.RepositoryGroupingMetadata,
   ) => {
     lastRepositoryIdentities.delete(workspaceRoot);
-    if (repositoryIdentity === null) return;
+    if (metadata.repositoryIdentity === null && metadata.localRepositoryRoot === null) return;
     if (lastRepositoryIdentities.size >= cacheCapacity) {
       const oldestRoot = lastRepositoryIdentities.keys().next().value;
       if (oldestRoot !== undefined) lastRepositoryIdentities.delete(oldestRoot);
     }
-    lastRepositoryIdentities.set(workspaceRoot, repositoryIdentity);
+    lastRepositoryIdentities.set(workspaceRoot, metadata);
   };
 
   const repositoryIdentityCache = yield* Cache.makeWith(
@@ -116,7 +120,17 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
         const lookup = {};
         lookupsInFlight.set(workspaceRoot, lookup);
         const isCurrent = () => lookupsInFlight.get(workspaceRoot) === lookup;
-        return Effect.exit(repositoryIdentityResolver.resolve(workspaceRoot)).pipe(
+        const metadata =
+          repositoryIdentityResolver.resolveGroupingMetadata?.(workspaceRoot) ??
+          repositoryIdentityResolver
+            .resolve(workspaceRoot)
+            .pipe(
+              Effect.map((repositoryIdentity) => ({
+                repositoryIdentity,
+                localRepositoryRoot: null,
+              })),
+            );
+        return Effect.exit(metadata).pipe(
           Effect.tap((result) =>
             Effect.sync(() => {
               if (Exit.isSuccess(result) && isCurrent()) {
@@ -204,7 +218,12 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
         workspaceRoot,
         repositoryIdentityResolved,
         enrichment: {
-          repositoryIdentity: availableValue(Option.some(repositoryIdentity)),
+          repositoryIdentity: Exit.isSuccess(repositoryIdentity)
+            ? repositoryIdentity.value.repositoryIdentity
+            : null,
+          ...(Exit.isSuccess(repositoryIdentity)
+            ? { localRepositoryRoot: repositoryIdentity.value.localRepositoryRoot }
+            : {}),
           faviconPath: availableValue(faviconPath),
           repositoryIdentityResolved,
         },
@@ -277,10 +296,12 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
         { concurrency: "unbounded" },
       );
       const repositoryIdentityResolved = isSuccessfullyResolved(repositoryIdentity);
+      const metadata = repositoryIdentityResolved
+        ? availableValue(repositoryIdentity)
+        : lastRepositoryIdentities.get(workspaceRoot);
       return {
-        repositoryIdentity: repositoryIdentityResolved
-          ? availableValue(repositoryIdentity)
-          : (lastRepositoryIdentities.get(workspaceRoot) ?? null),
+        repositoryIdentity: metadata?.repositoryIdentity ?? null,
+        ...(metadata == null ? {} : { localRepositoryRoot: metadata.localRepositoryRoot }),
         faviconPath: availableValue(faviconPath),
         repositoryIdentityResolved,
       };
@@ -316,7 +337,7 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const readRepositoryIdentity: ProjectEnrichmentService["Service"]["readRepositoryIdentity"] =
     Effect.fn("ProjectEnrichmentService.readRepositoryIdentity")(function* (workspaceRoot) {
       const resolved = yield* Cache.get(repositoryIdentityCache, workspaceRoot);
-      return Exit.isSuccess(resolved) ? resolved.value : null;
+      return Exit.isSuccess(resolved) ? resolved.value.repositoryIdentity : null;
     });
 
   const invalidate: ProjectEnrichmentService["Service"]["invalidate"] = Effect.fn(

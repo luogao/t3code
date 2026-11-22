@@ -1144,6 +1144,7 @@ type ShellThreadRow = {
   readonly pending_request_payload_json: string | null;
   readonly pending_secret_request_payload_json: string | null;
   readonly pending_link_request_payload_json: string | null;
+  readonly latest_message_at: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
   readonly has_actionable_proposed_plan: number;
@@ -1745,6 +1746,18 @@ export function threadShellFromProjection(
       )[0] ?? null,
   );
 
+  let latestMessageAt: DateTime.Utc | null = null;
+  for (const message of projection.messages) {
+    if (
+      (message.role === "user" || message.role === "assistant") &&
+      idleCompactionOf(message) === undefined &&
+      (latestMessageAt === null ||
+        DateTime.toEpochMillis(message.createdAt) > DateTime.toEpochMillis(latestMessageAt))
+    ) {
+      latestMessageAt = message.createdAt;
+    }
+  }
+
   const userMessages = projection.messages
     .filter((message) => message.role === "user" && idleCompactionOf(message) === undefined)
     .toSorted(
@@ -1843,6 +1856,7 @@ export function threadShellFromProjection(
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
     latestVisibleMessage: null,
+    latestMessageAt,
     latestUserMessageAt: latestUserMessage?.updatedAt ?? null,
     latestUserAuthoredMessageAt,
     hasActionableProposedPlan: projection.plans.some(
@@ -1975,6 +1989,7 @@ type ShellThreadState = {
   readonly lastErrorCode: OrchestrationV2ThreadShell["lastErrorCode"];
   readonly usageLimitResetAt: OrchestrationV2ThreadShell["usageLimitResetAt"];
   readonly pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
+  readonly latestMessageAt: DateTime.Utc | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   readonly hasActionableProposedPlan: boolean;
@@ -2148,6 +2163,7 @@ function shellFromState(input: {
     pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     pendingGuestMessageCount: pendingGuestMessageCount(input.state.thread.guestShare),
     latestVisibleMessage: null,
+    latestMessageAt: input.state.latestMessageAt,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
     hasActionableProposedPlan: input.state.hasActionableProposedPlan,
@@ -7986,6 +8002,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS pending_link_request_payload_json,
               (
+                SELECT message.created_at
+                FROM orchestration_v2_projection_messages message
+                WHERE message.thread_id = t.thread_id
+                  AND message.role IN ('user', 'assistant')
+                  AND NOT COALESCE(${isIdleCompactionMessage("message")}, 0)
+                ORDER BY message.created_at DESC, message.message_id DESC
+                LIMIT 1
+              ) AS latest_message_at,
+              (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id
@@ -8655,6 +8680,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             row.last_error,
           ),
           pendingRuntimeRequest,
+          latestMessageAt:
+            row.latest_message_at === null ? null : DateTime.makeUnsafe(row.latest_message_at),
           latestUserMessageAt:
             row.latest_user_message_at === null
               ? null

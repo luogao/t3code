@@ -99,6 +99,10 @@ const EARLY_LOAD_GRACE = "3 seconds";
 
 type ShellOriginIdentity = Omit<Persistence.ShellCacheOrigin, "snapshotAt">;
 
+interface ShellHistoryOptions {
+  readonly includeOlderSettled?: boolean;
+}
+
 interface ShellSubscription {
   readonly session: RpcSession;
   /** What a snapshot from this subscription descends from; null when the server did not say. */
@@ -108,6 +112,7 @@ interface ShellSubscription {
 function shellIdentity(
   environment: Pick<ExecutionEnvironmentDescriptor, "serverVersion" | "databaseMigration">,
   flags: { readonly shellThreadFamilies?: boolean; readonly shellOlderSettled?: boolean },
+  options: ShellHistoryOptions,
 ): ShellOriginIdentity {
   const omitIdleSubagents = flags.shellThreadFamilies === true;
   return {
@@ -115,7 +120,8 @@ function shellIdentity(
     // Migrations rewrite projections without events, so a migrated server reloads.
     databaseMigration: environment.databaseMigration ?? null,
     omitIdleSubagents,
-    omitOlderSettled: flags.shellOlderSettled === true && omitIdleSubagents,
+    omitOlderSettled:
+      !options.includeOlderSettled && flags.shellOlderSettled === true && omitIdleSubagents,
   };
 }
 
@@ -127,9 +133,10 @@ function sameConnection(left: PreparedConnection, right: PreparedConnection): bo
 /** Null for a server whose descriptor does not name its shell flags; only its config does. */
 function descriptorShellIdentity(
   descriptor: ExecutionEnvironmentDescriptor | undefined,
+  options: ShellHistoryOptions,
 ): ShellOriginIdentity | null {
   if (descriptor?.capabilities.shellThreadFamilies === undefined) return null;
-  return shellIdentity(descriptor, descriptor.capabilities);
+  return shellIdentity(descriptor, descriptor.capabilities, options);
 }
 
 function sameShellIdentity(left: ShellOriginIdentity, right: ShellOriginIdentity): boolean {
@@ -171,7 +178,9 @@ interface LiveShell {
   readonly origin: Persistence.ShellCacheOrigin | undefined;
 }
 
-export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* () {
+export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* (
+  options: ShellHistoryOptions = {},
+) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   const cache = yield* Persistence.EnvironmentCacheStore;
   const snapshotLoader = yield* ShellSnapshotLoader.ShellSnapshotLoader;
@@ -569,7 +578,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           return [current.claimed && done ? null : current, next] as const;
         }
         if (current !== null) yield* Fiber.interrupt(current.fiber);
-        const identity = descriptorShellIdentity(prepared?.descriptor);
+        const identity = descriptorShellIdentity(prepared?.descriptor, options);
         if (prepared === null || identity === null) return [null, null] as const;
         // Items a closed session still has in flight must not land on the rows this loads.
         yield* Ref.set(activeSubscription, null);
@@ -629,7 +638,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       ORCHESTRATION_V2_WS_METHODS.subscribeShell,
       Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
         const identity = yield* session.initialConfig.pipe(
-          Effect.map((config) => shellIdentity(config.environment, config)),
+          Effect.map((config) => shellIdentity(config.environment, config, options)),
           Effect.orElseSucceed(() => null),
         );
         const { omitIdleSubagents, omitOlderSettled } = identity ?? {
@@ -742,10 +751,10 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   return state;
 });
 
-function shellStateChanges(environmentId: EnvironmentId) {
+function shellStateChanges(environmentId: EnvironmentId, options: ShellHistoryOptions) {
   return followStreamInEnvironment(
     environmentId,
-    Stream.unwrap(makeEnvironmentShellState().pipe(Effect.map(SubscriptionRef.changes))),
+    Stream.unwrap(makeEnvironmentShellState(options).pipe(Effect.map(SubscriptionRef.changes))),
   );
 }
 
@@ -871,9 +880,10 @@ export function createEnvironmentShellAtoms<R, E>(
     | R,
     E
   >,
+  options: ShellHistoryOptions = {},
 ) {
   const stateAtom = Atom.family((environmentId: EnvironmentId) =>
-    runtime.atom(shellStateChanges(environmentId), {
+    runtime.atom(shellStateChanges(environmentId, options), {
       initialValue: EMPTY_SHELL_STATE,
     }),
   );

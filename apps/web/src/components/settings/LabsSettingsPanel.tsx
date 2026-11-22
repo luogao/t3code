@@ -36,7 +36,7 @@ function BoringSidebarRow() {
   return (
     <SettingsRow
       {...searchableSetting("boring-sidebar")}
-      description="Group sidebar threads into project folders. Pinned threads stay on top, and Snoozed and Settled stay below the folders."
+      description="Show active and past conversations together in their project folders."
       control={
         <Switch
           checked={settings.boringSidebarEnabled}

@@ -109,11 +109,19 @@ export const loadShellUnlessResumable = Effect.fnUntraced(function* <A, E, R>(in
  * its HTTP snapshot had, and a resume that computes the same one skips its marked snapshot.
  */
 export function projectIdentitiesDigest(
-  projects: ReadonlyArray<Pick<OrchestrationProjectShell, "id" | "repositoryIdentity">>,
+  projects: ReadonlyArray<
+    Pick<OrchestrationProjectShell, "id" | "repositoryIdentity" | "localRepositoryRoot">
+  >,
 ): string {
   const hash = NodeCrypto.createHash("sha256");
   for (const project of projects) {
-    hash.update(JSON.stringify([project.id, project.repositoryIdentity ?? null]));
+    hash.update(
+      JSON.stringify([
+        project.id,
+        project.repositoryIdentity ?? null,
+        project.localRepositoryRoot ?? null,
+      ]),
+    );
   }
   return hash.digest("base64url");
 }
@@ -125,7 +133,10 @@ export function projectIdentitiesDigest(
  */
 export function resumeIdentityRoots(input: {
   readonly projects: ReadonlyArray<
-    Pick<OrchestrationProjectShell, "id" | "workspaceRoot" | "repositoryIdentity">
+    Pick<
+      OrchestrationProjectShell,
+      "id" | "workspaceRoot" | "repositoryIdentity" | "localRepositoryRoot"
+    >
   >;
   readonly resolvedRepositoryIdentityRoots: ReadonlyArray<string>;
   readonly knownProjectIdentities: string | undefined;
@@ -135,7 +146,9 @@ export function resumeIdentityRoots(input: {
   }
   const withoutIdentity = new Set(
     input.projects.flatMap((project) =>
-      project.repositoryIdentity == null ? [project.workspaceRoot] : [],
+      project.repositoryIdentity == null && project.localRepositoryRoot == null
+        ? [project.workspaceRoot]
+        : [],
     ),
   );
   return input.resolvedRepositoryIdentityRoots.filter((root) => withoutIdentity.has(root));

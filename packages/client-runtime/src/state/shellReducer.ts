@@ -60,14 +60,20 @@ function retainRepositoryIdentity(
   previous: OrchestrationProjectShell | undefined,
   next: OrchestrationProjectShell,
 ): OrchestrationProjectShell {
-  if (
-    next.repositoryIdentity == null &&
-    previous?.repositoryIdentity != null &&
-    previous.workspaceRoot === next.workspaceRoot
-  ) {
-    return { ...next, repositoryIdentity: previous.repositoryIdentity };
-  }
-  return next;
+  if (previous?.workspaceRoot !== next.workspaceRoot) return next;
+  const repositoryIdentity = next.repositoryIdentity ?? previous.repositoryIdentity;
+  const localRepositoryRoot =
+    next.localRepositoryRoot === undefined
+      ? previous.localRepositoryRoot
+      : next.localRepositoryRoot;
+  return repositoryIdentity === next.repositoryIdentity &&
+    localRepositoryRoot === next.localRepositoryRoot
+    ? next
+    : {
+        ...next,
+        repositoryIdentity,
+        ...(localRepositoryRoot === undefined ? {} : { localRepositoryRoot }),
+      };
 }
 
 export interface MergeShellSnapshotOptions {
@@ -101,10 +107,20 @@ export function mergeShellSnapshotProjects(
       if (resolvedRootSet?.has(project.workspaceRoot) === true) {
         // Refreshes re-resolve every root; an unchanged identity keeps the project's identity
         // so every subscriber (each pull request row, the sidebar) skips re-rendering.
-        if (sameRepositoryIdentity(project.repositoryIdentity, candidate.repositoryIdentity)) {
+        if (
+          sameRepositoryIdentity(project.repositoryIdentity, candidate.repositoryIdentity) &&
+          project.localRepositoryRoot === candidate.localRepositoryRoot
+        ) {
           return project;
         }
-        return { ...project, repositoryIdentity: candidate.repositoryIdentity };
+        const { localRepositoryRoot: _previousRoot, ...current } = project;
+        return {
+          ...current,
+          repositoryIdentity: candidate.repositoryIdentity,
+          ...(candidate.localRepositoryRoot === undefined
+            ? {}
+            : { localRepositoryRoot: candidate.localRepositoryRoot }),
+        };
       }
       if (project.repositoryIdentity == null && candidate.repositoryIdentity != null) {
         return { ...project, repositoryIdentity: candidate.repositoryIdentity };

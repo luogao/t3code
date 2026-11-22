@@ -120,6 +120,32 @@ function settings(
   };
 }
 
+it("groups remote-less worktrees only with their own repository on the same machine", () => {
+  const repo = makeProject("main", "/work/motion", {
+    repositoryIdentity: null,
+    localRepositoryRoot: "/work/motion",
+  });
+  const worktree = makeProject("test", "/tmp/test", {
+    repositoryIdentity: null,
+    localRepositoryRoot: "/work/motion",
+  });
+  const nestedRepo = makeProject("other", "/work/motion/other", {
+    repositoryIdentity: null,
+    localRepositoryRoot: "/work/motion/other",
+  });
+  const secondMachine = { ...repo, environmentId: EnvironmentId.make("other-machine") };
+  const groups = buildProjectGroups({
+    projects: [worktree, repo, nestedRepo, secondMachine],
+    settings: settings("repository"),
+  });
+  expect(groups.map((group) => group.members.map(({ project }) => project.id))).toEqual([
+    [worktree.id, repo.id],
+    [nestedRepo.id],
+    [secondMachine.id],
+  ]);
+  expect(groups[0]?.representative).toBe(repo);
+});
+
 describe("buildProjectGroups", () => {
   it.each(["repository", "repository_path", "separate"] as const)(
     "keeps scratch project ownership separate by default in %s mode",

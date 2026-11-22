@@ -65,17 +65,21 @@ describe("clientPersistenceStorage", () => {
     vi.spyOn(testWindow.localStorage, "getItem").mockImplementationOnce(() => {
       throw failure;
     });
-    const { readBrowserClientSettings } = await import("./clientPersistenceStorage");
+    const { readBrowserClientSettings, writeBrowserClientSettings } =
+      await import("./clientPersistenceStorage");
 
     expect(() => readBrowserClientSettings()).toThrow(
       expect.objectContaining({
         _tag: "LocalStorageOperationError",
         operation: "read",
-        storageKey: "t3code:client-settings:v1",
+        storageKey: "t3code:client-settings:v2",
         cause: failure,
       }),
     );
-    expect(readBrowserClientSettings()).toEqual(settings);
+    expect(readBrowserClientSettings()).toEqual({ ...settings, boringSidebarEnabled: true });
     expect(write).not.toHaveBeenCalled();
+
+    writeBrowserClientSettings({ ...settings, boringSidebarEnabled: false });
+    expect(readBrowserClientSettings()).toEqual({ ...settings, boringSidebarEnabled: false });
   });
 });

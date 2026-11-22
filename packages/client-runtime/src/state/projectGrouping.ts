@@ -12,6 +12,7 @@ import type { EnvironmentProject } from "./models.ts";
 import { normalizeProjectPathForComparison } from "./projects.ts";
 
 const SCRATCH_PROJECT_SCOPE_KEY = "\0no-project";
+const LOCAL_REPOSITORY_GROUP_PREFIX = "\0local-repository:";
 
 export interface ProjectGroupingSettings {
   readonly sidebarProjectGroupingMode: SidebarProjectGroupingMode;
@@ -129,7 +130,12 @@ function deriveRepositoryScopedKey(
 function deriveLogicalProjectKey(
   project: Pick<
     EnvironmentProject,
-    "environmentId" | "id" | "workspaceRoot" | "repositoryIdentity" | "isScratch"
+    | "environmentId"
+    | "id"
+    | "workspaceRoot"
+    | "repositoryIdentity"
+    | "localRepositoryRoot"
+    | "isScratch"
   >,
   options?: {
     readonly groupingMode?: SidebarProjectGroupingMode;
@@ -144,6 +150,10 @@ function deriveLogicalProjectKey(
 
   return (
     deriveRepositoryScopedKey(project, groupingMode) ??
+    (groupingMode === "repository" && project.localRepositoryRoot
+      ? LOCAL_REPOSITORY_GROUP_PREFIX +
+        derivePhysicalProjectKeyFromPath(project.environmentId, project.localRepositoryRoot)
+      : null) ??
     derivePhysicalProjectKey(project) ??
     scopedProjectKey(scopeProjectRef(project.environmentId, project.id))
   );
@@ -152,7 +162,12 @@ function deriveLogicalProjectKey(
 export function deriveLogicalProjectKeyFromSettings(
   project: Pick<
     EnvironmentProject,
-    "environmentId" | "id" | "workspaceRoot" | "repositoryIdentity" | "isScratch"
+    | "environmentId"
+    | "id"
+    | "workspaceRoot"
+    | "repositoryIdentity"
+    | "localRepositoryRoot"
+    | "isScratch"
   >,
   settings: ProjectGroupingSettings,
   options?: { readonly groupScratchProjects?: boolean },
@@ -372,10 +387,23 @@ export function buildProjectGroups<TProject extends EnvironmentProject>(input: {
 
   const preferredEnvironmentId = input.preferredEnvironmentId ?? null;
   return Array.from(groupedMembers, ([key, members]) => {
+    const localRootProject = key.startsWith(LOCAL_REPOSITORY_GROUP_PREFIX)
+      ? members.find(
+          (member) =>
+            member.project.localRepositoryRoot != null &&
+            member.physicalProjectKey ===
+              derivePhysicalProjectKeyFromPath(
+                member.project.environmentId,
+                member.project.localRepositoryRoot,
+              ),
+        )?.project
+      : undefined;
     const representative =
+      localRootProject ??
       (preferredEnvironmentId
         ? members.find((member) => member.project.environmentId === preferredEnvironmentId)?.project
-        : null) ?? members[0]!.project;
+        : null) ??
+      members[0]!.project;
     return {
       key,
       label:
