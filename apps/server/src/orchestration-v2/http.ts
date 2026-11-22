@@ -74,6 +74,9 @@ export const layer = HttpApiBuilder.group(
               Effect.map((enrichment) => ({
                 ...project,
                 repositoryIdentity: enrichment.repositoryIdentity,
+                ...(enrichment.localRepositoryRoot === undefined
+                  ? {}
+                  : { localRepositoryRoot: enrichment.localRepositoryRoot }),
               })),
             ),
           { concurrency: 16 },

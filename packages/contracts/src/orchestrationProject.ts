@@ -13,6 +13,7 @@ export const OrchestrationProjectShell = Schema.Struct({
   hasCustomTitle: Schema.optional(Schema.Boolean),
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  localRepositoryRoot: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   // Opt-in because background sync performs network I/O and may move the checkout.

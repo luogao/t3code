@@ -14,6 +14,7 @@ import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
 const SCRATCH_PROJECT_SCOPE_KEY = "\0no-project";
+const LOCAL_REPOSITORY_GROUP_PREFIX = "\0local-repository:";
 
 export interface ProjectGroupingSettings {
   readonly sidebarProjectGroupingMode: SidebarProjectGroupingMode;
@@ -145,7 +146,12 @@ function deriveRepositoryScopedKey(
 function deriveLogicalProjectKey(
   project: Pick<
     EnvironmentProject,
-    "environmentId" | "id" | "workspaceRoot" | "repositoryIdentity" | "isScratch"
+    | "environmentId"
+    | "id"
+    | "workspaceRoot"
+    | "repositoryIdentity"
+    | "localRepositoryRoot"
+    | "isScratch"
   >,
   options?: {
     readonly groupingMode?: SidebarProjectGroupingMode;
@@ -160,6 +166,10 @@ function deriveLogicalProjectKey(
 
   return (
     deriveRepositoryScopedKey(project, groupingMode) ??
+    (groupingMode === "repository" && project.localRepositoryRoot
+      ? LOCAL_REPOSITORY_GROUP_PREFIX +
+        derivePhysicalProjectKeyFromPath(project.environmentId, project.localRepositoryRoot)
+      : null) ??
     derivePhysicalProjectKey(project) ??
     scopedProjectKey(scopeProjectRef(project.environmentId, project.id))
   );
@@ -168,7 +178,12 @@ function deriveLogicalProjectKey(
 export function deriveLogicalProjectKeyFromSettings(
   project: Pick<
     EnvironmentProject,
-    "environmentId" | "id" | "workspaceRoot" | "repositoryIdentity" | "isScratch"
+    | "environmentId"
+    | "id"
+    | "workspaceRoot"
+    | "repositoryIdentity"
+    | "localRepositoryRoot"
+    | "isScratch"
   >,
   settings: ProjectGroupingSettings,
   options?: { readonly groupScratchProjects?: boolean },
@@ -201,7 +216,12 @@ export function resolveScratchProjectScopeKey(
   projects: ReadonlyArray<
     Pick<
       EnvironmentProject,
-      "environmentId" | "id" | "workspaceRoot" | "repositoryIdentity" | "isScratch"
+      | "environmentId"
+      | "id"
+      | "workspaceRoot"
+      | "repositoryIdentity"
+      | "localRepositoryRoot"
+      | "isScratch"
     >
   >,
   settings: ProjectGroupingSettings = {
@@ -413,12 +433,25 @@ export function buildProjectGroups<TProject extends EnvironmentProject>(
   const preferredEnvironmentId = input.preferredEnvironmentId ?? null;
   return Array.from(groupedMembers, ([key, members]) => {
     const projects = members.map((member) => member.project);
+    const localRootProject = key.startsWith(LOCAL_REPOSITORY_GROUP_PREFIX)
+      ? members.find(
+          (member) =>
+            member.project.localRepositoryRoot != null &&
+            member.physicalProjectKey ===
+              derivePhysicalProjectKeyFromPath(
+                member.project.environmentId,
+                member.project.localRepositoryRoot,
+              ),
+        )?.project
+      : undefined;
     const representative =
+      localRootProject ??
       (preferredEnvironmentId
         ? selectGroupDefaultProject(
             projects.filter((project) => project.environmentId === preferredEnvironmentId),
           )
-        : undefined) ?? selectGroupDefaultProject(projects)!;
+        : undefined) ??
+      selectGroupDefaultProject(projects)!;
     return {
       key,
       label:

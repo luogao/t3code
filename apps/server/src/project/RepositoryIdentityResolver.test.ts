@@ -34,6 +34,45 @@ const git = (cwd: string, args: ReadonlyArray<string>) =>
   }).pipe(Effect.provide(ProcessRunner.layer));
 
 it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
+  it.effect("uses the common Git directory for a remote-less linked worktree", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-local-repo-" });
+      const main = path.join(root, "main");
+      const worktree = path.join(root, "worktree");
+      const other = path.join(main, "independent");
+      yield* fs.makeDirectory(main);
+      yield* git(main, ["init"]);
+      expect(
+        (yield* git(main, [
+          "-c",
+          "user.name=T3 Test",
+          "-c",
+          "user.email=t3@example.test",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "initial",
+        ])).code,
+      ).toBe(0);
+      expect((yield* git(main, ["worktree", "add", "--detach", worktree])).code).toBe(0);
+      yield* fs.makeDirectory(other);
+      yield* git(other, ["init"]);
+
+      const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+      const metadata = yield* resolver.resolveGroupingMetadata!(main);
+      expect(metadata.repositoryIdentity).toBeNull();
+      expect(
+        metadata.localRepositoryRoot && NodeFS.realpathSync.native(metadata.localRepositoryRoot),
+      ).toBe(NodeFS.realpathSync.native(main));
+      expect(yield* resolver.resolveGroupingMetadata!(worktree)).toEqual(metadata);
+      expect((yield* resolver.resolveGroupingMetadata!(other)).localRepositoryRoot).not.toBe(
+        metadata.localRepositoryRoot,
+      );
+    }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
   it.effect("normalizes equivalent GitHub remotes into a stable repository identity", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

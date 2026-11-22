@@ -30,9 +30,18 @@ export interface RepositoryIdentityResolverOptions {
   ) => Effect.Effect<RepositoryIdentity, SourceControlProviderError>;
 }
 
+export interface RepositoryGroupingMetadata {
+  readonly repositoryIdentity: RepositoryIdentity | null;
+  readonly localRepositoryRoot: string | null;
+}
+
 export class RepositoryIdentityResolver extends Context.Service<
   RepositoryIdentityResolver,
   {
+    readonly resolveGroupingMetadata?: (
+      cwd: string,
+      options?: { readonly refresh?: boolean },
+    ) => Effect.Effect<RepositoryGroupingMetadata>;
     readonly resolve: (
       cwd: string,
       options?: { readonly refresh?: boolean },
@@ -320,7 +329,7 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   "RepositoryIdentityResolver.resolveFromCacheKey",
 )(function* (
   cacheKey: RepositoryIdentityCacheKey,
-): Effect.fn.Return<RepositoryIdentity | null, never, ProcessRunner.ProcessRunner> {
+): Effect.fn.Return<RepositoryGroupingMetadata, never, ProcessRunner.ProcessRunner | Path.Path> {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const env = gitEnv(yield* HostProcess.Platform);
   const runGit = (args: ReadonlyArray<string>) =>
@@ -336,8 +345,9 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     [runGit(["remote", "-v"]), runGit(["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"])],
     { concurrency: "unbounded" },
   );
+  const empty = { repositoryIdentity: null, localRepositoryRoot: null };
   if (remoteResult._tag === "None" || remoteResult.value.code !== 0) {
-    return null;
+    return empty;
   }
 
   const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
@@ -347,20 +357,35 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
       ? resolvedResult.value.stdout
       : "";
   const remote = pickPrimaryRemote(remotes, resolved);
-  if (!remote) return null;
-  const originUrl = remotes.get("origin");
-  const keyUrl = yield* sshResolvedRemoteUrl(remote.remoteUrl);
-  const originKeyUrl =
-    originUrl === undefined || originUrl === remote.remoteUrl
-      ? keyUrl
-      : yield* sshResolvedRemoteUrl(originUrl);
-  return buildRepositoryIdentity({
-    ...remote,
-    keyUrl,
-    originUrl,
-    originKeyUrl,
-    rootPath: cacheKey.rootPath,
-  });
+  if (remote !== null) {
+    const originUrl = remotes.get("origin");
+    const keyUrl = yield* sshResolvedRemoteUrl(remote.remoteUrl);
+    const originKeyUrl =
+      originUrl === undefined || originUrl === remote.remoteUrl
+        ? keyUrl
+        : yield* sshResolvedRemoteUrl(originUrl);
+    return {
+      repositoryIdentity: buildRepositoryIdentity({
+        ...remote,
+        keyUrl,
+        originUrl,
+        originKeyUrl,
+        rootPath: cacheKey.rootPath,
+      }),
+      localRepositoryRoot: null,
+    };
+  }
+  const commonDir = yield* runGit(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (commonDir._tag === "None" || commonDir.value.code !== 0) return empty;
+  const path = yield* Path.Path;
+  const directory = commonDir.value.stdout.replace(/\r?\n$/, "");
+  return path.isAbsolute(directory)
+    ? {
+        ...empty,
+        localRepositoryRoot:
+          path.basename(directory) === ".git" ? path.dirname(directory) : directory,
+      }
+    : empty;
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
@@ -390,30 +415,47 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
 
   const repositoryIdentityCache = yield* Cache.makeWith<
     RepositoryIdentityCacheKey,
-    RepositoryIdentity | null
+    RepositoryGroupingMetadata
   >(
     (cacheKey) =>
       resolveRepositoryIdentityFromCacheKey(cacheKey).pipe(
         Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
-        Effect.filterOrElse(
-          (identity): identity is null => identity === null,
-          (identity) => refine(identity).pipe(Effect.orElseSucceed(() => identity)),
-        ),
+        Effect.provideService(Path.Path, path),
+        Effect.flatMap((metadata): Effect.Effect<RepositoryGroupingMetadata> => {
+          const identity = metadata.repositoryIdentity;
+          return identity === null
+            ? Effect.succeed(metadata)
+            : refine(identity).pipe(
+                Effect.orElseSucceed(() => identity),
+                Effect.map((repositoryIdentity) => ({ ...metadata, repositoryIdentity })),
+              );
+        }),
       ),
-    { capacity: cacheCapacity, timeToLive },
-  );
-
-  const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fnUntraced(
-    function* (cwd, options) {
-      if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
-      const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
-      if (cacheKey === null) return null;
-      if (options?.refresh) yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
-      return yield* Cache.get(repositoryIdentityCache, cacheKey);
+    {
+      capacity: cacheCapacity,
+      timeToLive: (exit) =>
+        timeToLive(
+          Exit.map(exit, (value) => value.repositoryIdentity ?? value.localRepositoryRoot),
+        ),
     },
   );
 
-  return RepositoryIdentityResolver.of({ resolve });
+  const resolveGroupingMetadata: NonNullable<
+    RepositoryIdentityResolver["Service"]["resolveGroupingMetadata"]
+  > = Effect.fnUntraced(function* (cwd, options) {
+    if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
+    const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
+    if (cacheKey === null) return { repositoryIdentity: null, localRepositoryRoot: null };
+    if (options?.refresh) yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
+    return yield* Cache.get(repositoryIdentityCache, cacheKey);
+  });
+
+  return RepositoryIdentityResolver.of({
+    resolveGroupingMetadata,
+    resolve: Effect.fn("RepositoryIdentityResolver.resolve")((cwd, options) =>
+      resolveGroupingMetadata(cwd, options).pipe(Effect.map((value) => value.repositoryIdentity)),
+    ),
+  });
 });
 
 export const layer = Layer.effect(RepositoryIdentityResolver, make()).pipe(
