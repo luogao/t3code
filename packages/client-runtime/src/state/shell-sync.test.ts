@@ -1181,6 +1181,7 @@ describe("environment shell cold start", () => {
     early?: {
       readonly serverResumes: boolean;
       readonly holdLoads?: boolean | "uninterruptible";
+      readonly includeOlderSettled?: boolean;
     },
   ) {
     yield* TestClock.setTime(NOW);
@@ -1268,7 +1269,9 @@ describe("environment shell cold start", () => {
           ),
         ),
     });
-    const shellState = yield* makeEnvironmentShellState().pipe(
+    const shellState = yield* makeEnvironmentShellState({
+      includeOlderSettled: early?.includeOlderSettled === true,
+    }).pipe(
       Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
       Effect.provideService(Persistence.EnvironmentCacheStore, cache),
       Effect.provideService(ShellSnapshotLoader.ShellSnapshotLoader, snapshotLoader),
@@ -1479,6 +1482,26 @@ describe("environment shell cold start", () => {
         yield* h.liveAt(subscribes.afterSequence + 1);
         expect(yield* Ref.get(h.httpLoads)).toBe(loads.length);
       }),
+  );
+
+  it.effect("loads all settled history over HTTP and preserves it when subscribing", () =>
+    Effect.gen(function* () {
+      const origin = { ...RECENT_ORIGIN, ...FAMILY_FLAGS };
+      const h = yield* makeColdStart(origin, { serverResumes: true, includeOlderSettled: true });
+      // A cache made with the old trim cannot resume into a subscription with the full set.
+      expect(yield* Queue.take(h.loadOptions)).toEqual({
+        omitIdleSubagents: true,
+        omitOlderSettled: false,
+      });
+      yield* h.connect(FAMILY_CONFIG);
+      const subscription = yield* Queue.take(h.subscriptions);
+      expect(subscription.input).toMatchObject({
+        afterSequence: HTTP_SEQUENCE,
+        omitIdleSubagents: true,
+      });
+      expect(subscription.input).not.toHaveProperty("omitOlderSettled");
+      expect(yield* Ref.get(h.httpLoads)).toBe(1);
+    }),
   );
 
   it.effect("a replaced session waits for the load its connection already started", () =>

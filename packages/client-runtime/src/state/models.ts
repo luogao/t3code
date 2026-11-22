@@ -166,6 +166,7 @@ export interface EnvironmentThreadShell {
   readonly latestRun: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly blockedOnThreadWait?: boolean;
+  readonly latestMessageAt?: string | null;
   readonly latestUserMessageAt: string | null;
   readonly latestUserAuthoredMessageAt?: string | null;
   readonly hasPendingApprovals: boolean;
@@ -318,6 +319,9 @@ export function presentThreadShell(
     latestRun,
     runtime,
     blockedOnThreadWait: thread.blockedOnThreadWait ?? false,
+    ...(thread.latestMessageAt === undefined
+      ? {}
+      : { latestMessageAt: nullableIso(thread.latestMessageAt) }),
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
     ...(thread.latestUserAuthoredMessageAt === undefined
       ? {}

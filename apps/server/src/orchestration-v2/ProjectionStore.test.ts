@@ -1524,6 +1524,47 @@ it.effect("reads a delegated child's recent, unfinished and task runs without it
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("uses the latest conversation message creation time in each shell", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("latest-message-at");
+    const messageTimes = [
+      ["user", "2026-11-10T12:00:00Z", "2026-11-10T12:30:00Z", "Hello"],
+      ["assistant", "2026-11-10T12:10:00Z", "2026-11-10T12:10:00Z", "Response"],
+      ["user", "2026-11-10T12:40:00Z", "2026-11-10T12:40:00Z", "/compact"],
+    ] as const;
+    for (const [role, createdAt, updatedAt, text] of messageTimes) {
+      yield* store.apply({
+        id: EventId.make(`event:latest-message:${text}`),
+        type: "message.updated",
+        threadId,
+        occurredAt: DateTime.makeUnsafe(updatedAt),
+        payload: {
+          id: MessageId.make(`message:latest-message:${text}`),
+          threadId,
+          runId: null,
+          nodeId: null,
+          createdBy: text === "Hello" ? "user" : "agent",
+          creationSource: "server",
+          role,
+          text,
+          attachments: [],
+          streaming: false,
+          createdAt: DateTime.makeUnsafe(createdAt),
+          updatedAt: DateTime.makeUnsafe(updatedAt),
+        },
+      });
+    }
+    const shells = [
+      yield* store.getThreadShell(threadId),
+      ProjectionStore.threadShellFromProjection(yield* store.getThreadProjection(threadId)),
+    ];
+    for (const shell of shells) {
+      assert.deepStrictEqual(shell?.latestMessageAt, DateTime.makeUnsafe(messageTimes[1][1]));
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("shells flag a latest run triggered by a provider background wake", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;
