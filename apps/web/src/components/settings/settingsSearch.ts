@@ -581,6 +581,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("beta fast worktree checkout clone apfs copy-on-write cache macos speed")],
   },
   {
+    id: "auto-review",
+    title: msg("Independent Auto-Review"),
+    to: "/settings/labs",
+    searchTerms: [
+      msg(
+        "auto review reviewer cross model rework circuit breaker needs human checklist verification labs",
+      ),
+    ],
+  },
+  {
     id: "voice-transcription-destination",
     title: msg("Transcribe with"),
     to: "/settings/voice",

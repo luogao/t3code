@@ -1,4 +1,9 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type {
+  AutoReviewOverride,
+  AutoReviewStatus,
+  ContextMenuItem,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import { msg } from "gt-react";
 
@@ -17,6 +22,13 @@ export type ThreadActionMenuId =
   | "auto-settle"
   | "auto-settle:enabled"
   | "auto-settle:disabled"
+  | "auto-review"
+  | "auto-review:trigger"
+  | "auto-review:open-reviewer"
+  | "auto-review:acknowledge"
+  | "auto-review:inherit"
+  | "auto-review:enabled"
+  | "auto-review:disabled"
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
@@ -123,6 +135,12 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** Independent Auto-Review controls for eligible top-level threads on the primary environment. */
+  readonly autoReview?: {
+    readonly status: AutoReviewStatus | null;
+    readonly reviewerThreadId: ThreadId | null;
+    readonly override: AutoReviewOverride | null;
+  };
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -133,6 +151,7 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "project-settings",
     "mark-unread",
     "share-guest",
+    "auto-review:open-reviewer",
     "copy",
     "copy-path",
     "copy-branch",
@@ -265,6 +284,60 @@ export function buildThreadActionMenuItems(
           },
         ]
       : []),
+    ...(state.autoReview
+      ? [
+          {
+            id: "auto-review" as const,
+            label: resolve(msg("Auto-review")),
+            icon: "circle-check",
+            children: [
+              {
+                id: "auto-review:trigger" as const,
+                label:
+                  state.autoReview.status === "reviewing"
+                    ? resolve(msg("Reviewing…"))
+                    : resolve(msg("Run review now")),
+                icon: "refresh-cw",
+                disabled: state.isRunning || state.autoReview.status === "reviewing",
+              },
+              ...(state.autoReview.reviewerThreadId
+                ? [
+                    {
+                      id: "auto-review:open-reviewer" as const,
+                      label: resolve(msg("Open reviewer transcript")),
+                      icon: "message-square",
+                    },
+                  ]
+                : []),
+              ...(state.autoReview.status !== null && state.autoReview.status !== "reviewing"
+                ? [
+                    {
+                      id: "auto-review:acknowledge" as const,
+                      label: resolve(msg("Clear review status")),
+                      icon: "circle-check",
+                    },
+                  ]
+                : []),
+              {
+                id: "auto-review:inherit" as const,
+                label: resolve(msg("Follow project default")),
+                checked: state.autoReview.override === null,
+                separatorBefore: true,
+              },
+              {
+                id: "auto-review:enabled" as const,
+                label: resolve(msg("Always auto-review")),
+                checked: state.autoReview.override === "enabled",
+              },
+              {
+                id: "auto-review:disabled" as const,
+                label: resolve(msg("Off for this thread")),
+                checked: state.autoReview.override === "disabled",
+              },
+            ],
+          },
+        ]
+      : []),
     {
       id: "copy",
       label: resolve(msg("Copy", { $context: "submenu of things to copy" })),
@@ -310,15 +383,18 @@ export function buildThreadActionMenuItems(
   ];
   return state.canOperate
     ? items
-    : items.map((item) =>
-        threadActionRequiresOperate(item.id)
-          ? {
-              ...item,
-              disabled: true,
-              ...(item.children
-                ? { children: item.children.map((child) => ({ ...child, disabled: true })) }
-                : {}),
-            }
-          : item,
-      );
+    : items.map((item) => {
+        if (!item.children) {
+          return threadActionRequiresOperate(item.id) ? { ...item, disabled: true } : item;
+        }
+        const nextChildren = item.children.map((child) =>
+          threadActionRequiresOperate(child.id) ? { ...child, disabled: true } : child,
+        );
+        const allChildrenDisabled = nextChildren.every((child) => child.disabled === true);
+        return {
+          ...item,
+          disabled: item.disabled || (threadActionRequiresOperate(item.id) && allChildrenDisabled),
+          children: nextChildren,
+        };
+      });
 }

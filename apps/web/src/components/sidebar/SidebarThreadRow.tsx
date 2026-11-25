@@ -30,6 +30,7 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import { toServerClock } from "@t3tools/client-runtime/clock";
 import {
   AuthOrchestrationOperateScope,
+  type AutoReviewThreadState,
   type ContextMenuSource,
   type EnvironmentId,
   type EnvironmentMachineKind,
@@ -130,6 +131,7 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { ActivityShimmerOverlay } from "../chat/TimelineRowParts";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
+import { AutoReviewBadge, AutoReviewTooltipDetail } from "../../autoReview/AutoReviewBadge";
 import { ThreadDetailsIssueRows } from "../chat/ThreadDetailsIssueRows";
 import { IssueGlyph, issueStatePresentation } from "../issue/issuePresentation";
 
@@ -266,6 +268,7 @@ function SidebarThreadTooltip({
   branchMismatch,
   terminalStatus,
   terminalProcessCount,
+  autoReviewState,
 }: {
   thread: SidebarThreadSummary;
   project: ProjectFaviconProject | null;
@@ -283,6 +286,7 @@ function SidebarThreadTooltip({
   } | null;
   terminalStatus: TerminalStatusIndicator | null;
   terminalProcessCount: number;
+  autoReviewState?: AutoReviewThreadState | null | undefined;
 }) {
   const driverKind = providerEntry?.driverKind ?? null;
   const previousProviderNames = thread.providerInstanceHistory
@@ -390,6 +394,7 @@ function SidebarThreadTooltip({
             </div>
           </div>
         ) : null}
+        <AutoReviewTooltipDetail state={autoReviewState} />
       </ThreadHoverCard>
     </ThreadHoverCardPopup>
   );
@@ -631,6 +636,7 @@ type SidebarThreadRowProps = {
   onUnpin: (threadRef: ScopedThreadRef) => void;
   onAcknowledgeWoke: (threadRef: ScopedThreadRef, visitedAt: string) => void;
   onFileDropThreads?: ((threadRef: ScopedThreadRef, files: File[]) => void) | undefined;
+  autoReviewState?: AutoReviewThreadState | null | undefined;
 };
 
 // Mounted only while renaming, so each rename starts uncommitted.
@@ -881,6 +887,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       branchMismatch={branchMismatch}
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
+      autoReviewState={props.autoReviewState}
     />
   );
 
@@ -1270,7 +1277,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     prBadge === null &&
     issueBadge === null &&
     diff === null &&
-    runningTerminalIds.length === 0;
+    runningTerminalIds.length === 0 &&
+    props.autoReviewState == null;
   const metaLine = metaLineEmpty ? null : (
     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
       {checkoutThread.branch ? (
@@ -1292,6 +1300,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ) : (
         <span className="flex-1" />
       )}
+      <AutoReviewBadge state={props.autoReviewState} />
       {terminalStatusIcon}
       {prBadge}
       {issueBadge}
@@ -1382,6 +1391,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               )}
               {draftIndicator}
               {title}
+              {multiline ? null : <AutoReviewBadge state={props.autoReviewState} compact />}
               {multiline ? titleLineIcons : null}
               {pinIndicator}
               {multiline ? null : terminalStatusIcon}

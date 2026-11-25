@@ -76,6 +76,8 @@ import {
   ListFilterIcon,
   PlusIcon,
   SettingsIcon,
+  ShieldAlertIcon,
+  ShieldCheckIcon,
 } from "lucide-react";
 import {
   useEffect,
@@ -269,6 +271,15 @@ import {
   useComposerDraftStore,
   usePromotingDraftThreadKeys,
 } from "../composerDraftStore";
+import {
+  acknowledgeThreadAutoReview,
+  isAutoReviewNeedsHuman,
+  readAutoReviewSnapshot,
+  triggerThreadAutoReview,
+  updateAutoReviewConfig,
+  useAutoReviewSnapshot,
+  useAutoReviewSubscription,
+} from "../autoReview/store";
 import { useShownThreadRouteTarget } from "../hooks/useShownThreadRouteTarget";
 import {
   SidebarSearchResultRow,
@@ -1056,6 +1067,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // Row callbacks capture only the handler; the rest of the context changes with the route.
   const { handleNewThread } = newThreadContext;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  useAutoReviewSubscription(primaryEnvironmentId !== null);
+  const autoReviewSnapshot = useAutoReviewSnapshot();
+  const [needsHumanOnly, setNeedsHumanOnly] = useState(false);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
@@ -1185,6 +1199,23 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
+  const reviewerThreadIdSet = new Set(autoReviewSnapshot.reviewerThreadIds);
+  const sidebarThreads = listedThreads.filter(
+    (thread) =>
+      thread.environmentId !== primaryEnvironmentId ||
+      !reviewerThreadIdSet.has(thread.id) ||
+      threadShellKey(thread) === routeThreadKey,
+  );
+  const needsHumanCount = sidebarThreads.reduce((count, thread) => {
+    if (
+      thread.environmentId !== primaryEnvironmentId ||
+      thread.archivedAt !== null ||
+      delegatedUnderParent.has(threadShellKey(thread))
+    ) {
+      return count;
+    }
+    return isAutoReviewNeedsHuman(autoReviewSnapshot.threads[thread.id]) ? count + 1 : count;
+  }, 0);
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -1415,6 +1446,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectScopeKey,
     agent: sidebarAgent,
     matchesAgent: (thread) => {
+      if (
+        needsHumanOnly &&
+        (thread.environmentId !== primaryEnvironmentId ||
+          !isAutoReviewNeedsHuman(autoReviewSnapshot.threads[thread.id]))
+      ) {
+        return false;
+      }
       const instanceId = thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
       const providerEntry = providerEntriesByEnvironment.get(thread.environmentId)?.get(instanceId);
       return matchesSidebarAgent({
@@ -1427,7 +1465,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     serverConfigs,
     connectedEnvironmentIds,
     optimisticDrop,
-    threads: listedThreads,
+    threads: sidebarThreads,
     delegatedUnderParent,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
@@ -1437,6 +1475,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         : scopedProjectGroups
       : null,
     keepEmptyFolders: (group) =>
+      !needsHumanOnly &&
       sidebarAgent === "all" &&
       (scopedProjectGroups.length > 0 || (group.pinned && !group.archived)),
   });
@@ -2756,6 +2795,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const reviewSnapshot = readAutoReviewSnapshot();
+        const isAutoReviewEligible =
+          thread.environmentId === primaryEnvironmentId &&
+          !reviewSnapshot.reviewerThreadIds.includes(thread.id);
+        const threadReviewState = isAutoReviewEligible
+          ? (reviewSnapshot.threads[thread.id] ?? null)
+          : null;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -2784,6 +2830,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
               canRename: !fromSearch,
+              ...(isAutoReviewEligible
+                ? {
+                    autoReview: {
+                      status: threadReviewState?.status ?? null,
+                      reviewerThreadId: threadReviewState?.reviewerThreadId ?? null,
+                      override: reviewSnapshot.config.threadOverrides[thread.id] ?? null,
+                    },
+                  }
+                : {}),
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -2898,6 +2953,70 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   type: "error",
                   title: gt("Failed to update auto-settle"),
                   description: thrownErrorMessage(error, m) ?? gt("An error occurred."),
+                }),
+              );
+            }
+            return;
+          }
+          case "auto-review:trigger": {
+            try {
+              await triggerThreadAutoReview(thread.id);
+              toastManager.add({
+                type: "info",
+                title: gt("Auto-review started"),
+                description: thread.title,
+              });
+            } catch (error) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: gt("Could not start auto-review"),
+                  description: error instanceof Error ? error.message : gt("An error occurred."),
+                }),
+              );
+            }
+            return;
+          }
+          case "auto-review:open-reviewer": {
+            const reviewerId = threadReviewState?.reviewerThreadId;
+            if (reviewerId) {
+              void navigateToThread(scopeThreadRef(thread.environmentId, reviewerId));
+            }
+            return;
+          }
+          case "auto-review:acknowledge": {
+            try {
+              await acknowledgeThreadAutoReview(thread.id);
+            } catch (error) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: gt("Could not clear review status"),
+                  description: error instanceof Error ? error.message : gt("An error occurred."),
+                }),
+              );
+            }
+            return;
+          }
+          case "auto-review:inherit":
+          case "auto-review:enabled":
+          case "auto-review:disabled": {
+            const nextOverride =
+              clicked.value === "auto-review:inherit"
+                ? null
+                : clicked.value === "auto-review:enabled"
+                  ? "enabled"
+                  : "disabled";
+            try {
+              await updateAutoReviewConfig({
+                threadOverrides: { [thread.id]: nextOverride },
+              });
+            } catch (error) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: gt("Failed to update auto-review preference"),
+                  description: error instanceof Error ? error.message : gt("An error occurred."),
                 }),
               );
             }
@@ -3393,6 +3512,88 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   );
                 })}
               </div>
+              {primaryEnvironmentId !== null ? (
+                <div className="mt-1.5 flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-pressed={needsHumanOnly}
+                    data-testid="sidebar-needs-human-filter"
+                    onClick={() => {
+                      clearSelection();
+                      setSearchHighlightKey(null);
+                      setNeedsHumanOnly((current) => !current);
+                      scrollSidebarToTop(sidebarContentRef.current);
+                    }}
+                    className={cn(
+                      "flex h-7 min-w-0 flex-1 cursor-pointer items-center justify-between gap-1.5 rounded-md px-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+                      needsHumanOnly
+                        ? "bg-sidebar-row-selected font-medium text-sidebar-foreground ring-1 ring-inset ring-sidebar-border"
+                        : "bg-sidebar-control-surface text-sidebar-muted-foreground hover:text-sidebar-foreground",
+                    )}
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5 truncate">
+                      <ShieldAlertIcon
+                        aria-hidden
+                        className={cn(
+                          "size-3.5 shrink-0",
+                          needsHumanCount > 0 && "text-error-foreground",
+                        )}
+                      />
+                      <span className="truncate">
+                        <T>Needs you</T>
+                      </span>
+                    </span>
+                    <span
+                      className={cn(
+                        "inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full px-1 text-3xs font-medium tabular-nums",
+                        needsHumanCount > 0
+                          ? "bg-destructive/15 text-destructive-foreground"
+                          : "bg-sidebar-row-hover text-sidebar-muted-foreground",
+                      )}
+                    >
+                      {needsHumanCount}
+                    </span>
+                  </button>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          type="button"
+                          aria-label={
+                            autoReviewSnapshot.config.enabled
+                              ? gt("Auto-Review enabled. Open settings.")
+                              : gt("Auto-Review disabled. Open settings.")
+                          }
+                          onClick={() => {
+                            if (isMobile) setOpenMobile(false);
+                            void router.navigate({
+                              to: "/settings/labs",
+                              hash: "auto-review",
+                            });
+                          }}
+                          className="relative flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md bg-sidebar-control-surface text-sidebar-muted-foreground transition-colors hover:text-sidebar-foreground focus-visible:outline-2 focus-visible:outline-ring"
+                        >
+                          <ShieldCheckIcon aria-hidden className="size-3.5" />
+                          <span
+                            aria-hidden
+                            className={cn(
+                              "absolute top-1 right-1 size-1.5 rounded-full",
+                              autoReviewSnapshot.config.enabled
+                                ? "bg-success"
+                                : "bg-muted-foreground/40",
+                            )}
+                          />
+                        </button>
+                      }
+                    />
+                    <TooltipPopup>
+                      {autoReviewSnapshot.config.enabled
+                        ? gt("Auto-Review: On (configure)")
+                        : gt("Auto-Review: Off (configure)")}
+                    </TooltipPopup>
+                  </Tooltip>
+                </div>
+              ) : null}
             </TooltipProvider>
           </SidebarGroup>
         }
@@ -3527,6 +3728,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-sidebar-border px-2.5 py-1 text-2xs font-medium text-sidebar-muted-foreground transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
                   >
                     <T>Show all projects</T>
+                  </button>
+                </>
+              ) : needsHumanOnly ? (
+                <>
+                  <span>
+                    <T>No threads need your decision right now</T>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setNeedsHumanOnly(false)}
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-sidebar-border px-2.5 py-1 text-2xs font-medium text-sidebar-muted-foreground transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                  >
+                    <T>Show all threads</T>
                   </button>
                 </>
               ) : (
@@ -3685,6 +3899,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             onUnpin={attemptUnpin}
                             onAcknowledgeWoke={acknowledgeWoke}
                             onFileDropThreads={handleThreadFileDrop}
+                            autoReviewState={
+                              thread.environmentId === primaryEnvironmentId
+                                ? (autoReviewSnapshot.threads[thread.id] ?? null)
+                                : null
+                            }
                           />
                         );
                       };
