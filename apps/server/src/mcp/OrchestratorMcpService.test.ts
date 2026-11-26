@@ -3057,6 +3057,109 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  it.effect(
+    "delegates a local task to another registered project when target.projectId differs from the parent",
+    () =>
+      Effect.gen(function* () {
+        const targetProjectId = ProjectId.make("project:friday-other-repo");
+        const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+        const task = {
+          id: taskId,
+          threadId: parentThreadId,
+          runId: parentRunId,
+          parentNodeId,
+          origin: "app_owned",
+          createdBy: "agent",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          providerThreadId: null,
+          childThreadId,
+          nativeTaskRef: null,
+          prompt: "Inspect the second repository.",
+          title: null,
+          model: "gpt-5.4",
+          status: "running",
+          result: null,
+          startedAt: null,
+          completedAt: null,
+        };
+        let delegated = false;
+        const layerDependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            getThreadRecords: (threadId) =>
+              Effect.succeed(
+                threadId === parentThreadId
+                  ? parentProjection(delegated ? [task] : [])
+                  : childProjection,
+              ),
+            isProviderInstanceEnabledForProject: ({ projectId }) =>
+              Effect.succeed(projectId === targetProjectId),
+            dispatch: (command) =>
+              Ref.update(dispatched, (list) => [...list, command]).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    delegated = true;
+                  }),
+                ),
+                Effect.as({
+                  sequence: 1,
+                  storedEvents: [
+                    {
+                      sequence: 1,
+                      commandId: null,
+                      event: { type: "subagent.updated", payload: task },
+                    },
+                  ],
+                } as never),
+              ),
+          }),
+          providerRegistryLayer([
+            providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+          ]),
+          adapterRegistryLayer([codexInstanceId]),
+          Layer.mock(ProjectService.ProjectService)({
+            getById: (id) =>
+              id === targetProjectId
+                ? Effect.succeedSome({
+                    id: targetProjectId,
+                    title: "other-repo",
+                    workspaceRoot: "/workspace/other-repo",
+                  } as never)
+                : Effect.succeedNone,
+          }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          ServerSettings.layerTest(),
+        );
+
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const result = yield* service.delegateTask(scope, {
+            task: "Inspect the second repository.",
+            target: {
+              projectId: targetProjectId,
+              driverKind: ProviderDriverKind.make("codex"),
+            },
+            mode: "async",
+            clientRequestId: "delegate-local-cross-project-1",
+          });
+          assert.equal(result.status, "running");
+          const commands = yield* Ref.get(dispatched);
+          assert.equal(commands.length, 1);
+          const request = commands[0] as { projectId?: string };
+          assert.equal(request.projectId, targetProjectId);
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+      }),
+  );
+
   it.effect.each(["async", "wait"] as const)(
     "prepares a delegated child whose %s caller goes away after its run commits",
     (mode) =>

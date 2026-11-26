@@ -9955,6 +9955,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.title === undefined ? {} : { title: command.title }),
         ordinal: (yield* subagentCount(command.parentThreadId)) + 1,
       });
+      const targetProjectId = command.projectId ?? parentProjection.thread.projectId;
+      const isCrossProject = targetProjectId !== parentProjection.thread.projectId;
       const childThread: OrchestrationV2AppThread = {
         ...makeSubagentChildThread({
           parentThread: parentProjection.thread,
@@ -9968,9 +9970,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdBy: command.createdBy,
           creationSource: command.creationSource,
         }),
+        projectId: targetProjectId,
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
-        ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
+        ...(isCrossProject || command.workspaceStrategy !== undefined
+          ? { branch: null, worktreePath: null }
+          : {}),
       };
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,

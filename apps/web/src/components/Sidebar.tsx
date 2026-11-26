@@ -90,7 +90,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { type AnyRouter, useRouter } from "@tanstack/react-router";
+import { type AnyRouter, useLocation, useRouter } from "@tanstack/react-router";
 
 import {
   isAtomCommandInterrupted,
@@ -1067,6 +1067,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // Row callbacks capture only the handler; the rest of the context changes with the route.
   const { handleNewThread } = newThreadContext;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const isFridayRoute = useLocation({ select: (location) => location.pathname === "/friday" });
   useAutoReviewSubscription(primaryEnvironmentId !== null);
   const autoReviewSnapshot = useAutoReviewSnapshot();
   const [needsHumanOnly, setNeedsHumanOnly] = useState(false);
@@ -3554,6 +3555,45 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       {needsHumanCount}
                     </span>
                   </button>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          type="button"
+                          aria-label={gt("Open Friday spatial workspace (Cmd+Shift+F)")}
+                          data-testid="sidebar-friday-button"
+                          onClick={() => {
+                            if (isMobile) setOpenMobile(false);
+                            void router.navigate({ to: "/friday" });
+                          }}
+                          className={cn(
+                            "flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+                            isFridayRoute
+                              ? "bg-sidebar-row-selected text-sidebar-foreground ring-1 ring-inset ring-sidebar-border"
+                              : "bg-sidebar-control-surface text-sidebar-muted-foreground hover:text-sidebar-foreground",
+                          )}
+                        >
+                          <svg
+                            aria-hidden
+                            width="11"
+                            height="11"
+                            viewBox="0 0 12 12"
+                            fill="currentColor"
+                            className="shrink-0"
+                          >
+                            <rect x="1" y="1" width="4" height="4" rx="1" />
+                            <rect x="7" y="1" width="4" height="4" rx="1" opacity="0.45" />
+                            <rect x="1" y="7" width="4" height="4" rx="1" opacity="0.45" />
+                            <rect x="7" y="7" width="4" height="4" rx="1" />
+                          </svg>
+                          <span>
+                            <T>Friday</T>
+                          </span>
+                        </button>
+                      }
+                    />
+                    <TooltipPopup>{gt("Friday Spatial Canvas (Cmd+Shift+F)")}</TooltipPopup>
+                  </Tooltip>
                   <Tooltip>
                     <TooltipTrigger
                       render={

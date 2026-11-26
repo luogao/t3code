@@ -1664,9 +1664,11 @@ const make = Effect.gen(function* () {
     readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
+    readonly projectId?: ProjectId;
     /** Receipt replays bypass current settings because they start no work. Dispatch must reuse the checked command ID. */
     readonly skipProjectEnablementFilter?: boolean;
   }): Effect.fn.Return<ResolvedTarget, OrchestratorMcpFailure> {
+    const targetProjectId = input.projectId ?? input.parent.thread.projectId;
     const requestedInstanceId = input.target?.providerInstanceId;
     const requestedDriver = input.target?.driverKind;
     const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
@@ -1698,7 +1700,7 @@ const make = Effect.gen(function* () {
         const enabledForProject =
           input.skipProjectEnablementFilter === true ||
           (yield* threadManagement.isProviderInstanceEnabledForProject({
-            projectId: input.parent.thread.projectId,
+            projectId: targetProjectId,
             instanceId: candidate.instanceId,
           }));
         if (enabledForProject) {
@@ -2840,15 +2842,9 @@ const make = Effect.gen(function* () {
           : readTask(scope, taskId, false, true);
       }
       const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
-      if (
-        input.target?.projectId !== undefined &&
-        input.target.projectId !== parent.thread.projectId
-      ) {
-        return yield* failure(
-          "invalid_request",
-          "A local task runs in this thread's project. Omit target.projectId, or pass target.environmentId to run it in that environment's project.",
-        );
-      }
+      const targetProjectId = input.target?.projectId ?? parent.thread.projectId;
+      const isCrossProject = targetProjectId !== parent.thread.projectId;
+      const targetProject = isCrossProject ? yield* requireProject(targetProjectId) : undefined;
       const parentRun =
         ThreadManagementService.latestActiveRun(parent) ??
         (yield* backgroundSubagentRun(scope, parent.thread.id));
@@ -2874,7 +2870,11 @@ const make = Effect.gen(function* () {
         parent,
         target: input.target,
         providers,
-        cwd: yield* parentWorkspaceCwd(parent),
+        projectId: targetProjectId,
+        cwd:
+          targetProject !== undefined
+            ? targetProject.workspaceRoot
+            : yield* parentWorkspaceCwd(parent),
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
       const runtimeMode = yield* resolveRuntimeMode(
@@ -2888,21 +2888,29 @@ const make = Effect.gen(function* () {
       );
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
       if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
-        const project = yield* requireProject(parent.thread.projectId);
+        const project = targetProject ?? (yield* requireProject(targetProjectId));
+        const baseCwd = isCrossProject
+          ? project.workspaceRoot
+          : (parent.thread.worktreePath ?? project.workspaceRoot);
         const base = yield* gitDriver
           .resolveCommit({
-            cwd: parent.thread.worktreePath ?? project.workspaceRoot,
+            cwd: baseCwd,
             revision: "HEAD",
           })
           .pipe(
             Effect.mapError(() =>
-              failure("invalid_request", "Unable to resolve the parent checkout commit."),
+              failure(
+                "invalid_request",
+                isCrossProject
+                  ? `Unable to resolve HEAD commit for project "${project.title}".`
+                  : "Unable to resolve the parent checkout commit.",
+              ),
             ),
           );
         // Launch preparation creates the worktree from the project root, so a
         // parent checkout in another repository (such as a Git folder inside
         // Scratch) would hand it a commit it cannot find.
-        if (parent.thread.worktreePath !== null) {
+        if (!isCrossProject && parent.thread.worktreePath !== null) {
           yield* gitDriver
             .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
             .pipe(
@@ -2933,6 +2941,7 @@ const make = Effect.gen(function* () {
               parentThreadId: scope.thread.threadId,
               parentRunId: parentRun.id,
               parentNodeId,
+              ...(isCrossProject ? { projectId: targetProjectId } : {}),
               task: taskPrompt(input),
               ...(input.title === undefined ? {} : { title: input.title }),
               modelSelection: target.modelSelection,

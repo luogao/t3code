@@ -189,6 +189,9 @@ import * as GuestHttp from "./guest/http.ts";
 import * as AutoReviewHttp from "./autoReview/http.ts";
 import * as AutoReviewService from "./autoReview/AutoReviewService.ts";
 import * as AutoReviewStore from "./autoReview/AutoReviewStore.ts";
+import * as FridayHttp from "./friday/http.ts";
+import * as FridayService from "./friday/FridayService.ts";
+import * as FridayStore from "./friday/FridayStore.ts";
 import * as LinkThreadHttp from "./peer/linkThreadHttp.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
 import * as ConnectReachability from "./cloud/ConnectReachability.ts";
@@ -758,12 +761,16 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   Layer.effectDiscard(
     Effect.gen(function* () {
-      const service = yield* AutoReviewService.AutoReviewService;
-      yield* service.start();
+      const autoReview = yield* AutoReviewService.AutoReviewService;
+      yield* autoReview.start();
+      const friday = yield* FridayService.FridayService;
+      yield* friday.start();
     }),
   ).pipe(
+    Layer.provideMerge(FridayService.layer),
+    Layer.provide(FridayStore.layer),
     Layer.provideMerge(AutoReviewService.layer),
-    Layer.provide(AutoReviewStore.layer),
+    Layer.provideMerge(AutoReviewStore.layer),
     Layer.provide(ProjectionStoreV2.layer),
   ),
   ProviderUsageLimitsIngestion.layer,
@@ -901,6 +908,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAttachmentUploadRoute,
     GuestHttp.layer,
     AutoReviewHttp.layer,
+    FridayHttp.layer,
     LinkThreadHttp.layer,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,

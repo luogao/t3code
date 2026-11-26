@@ -350,6 +350,27 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
         return;
       }
       if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "f" &&
+        !(
+          event.target instanceof HTMLElement &&
+          (event.target.tagName === "INPUT" ||
+            event.target.tagName === "TEXTAREA" ||
+            event.target.isContentEditable)
+        )
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (router.state.location.pathname === "/friday") {
+          void router.navigate({ to: "/" });
+        } else {
+          void router.navigate({ to: "/friday" });
+        }
+        return;
+      }
+      if (
         !isSidebarToggleShortcut(event, keybindings, {
           context: {
             terminalFocus: isTerminalFocused(),
