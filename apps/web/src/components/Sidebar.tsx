@@ -280,6 +280,7 @@ import {
   useAutoReviewSnapshot,
   useAutoReviewSubscription,
 } from "../autoReview/store";
+import { useWorkspacePreparedConnection } from "../environments/workspaceHttp";
 import { useShownThreadRouteTarget } from "../hooks/useShownThreadRouteTarget";
 import {
   SidebarSearchResultRow,
@@ -1067,8 +1068,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // Row callbacks capture only the handler; the rest of the context changes with the route.
   const { handleNewThread } = newThreadContext;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { environmentId: workspaceEnvironmentId, connectionKey: workspaceConnectionKey } =
+    useWorkspacePreparedConnection();
   const isFridayRoute = useLocation({ select: (location) => location.pathname === "/friday" });
-  useAutoReviewSubscription(primaryEnvironmentId !== null);
+  useAutoReviewSubscription(workspaceEnvironmentId, workspaceConnectionKey);
   const autoReviewSnapshot = useAutoReviewSnapshot();
   const [needsHumanOnly, setNeedsHumanOnly] = useState(false);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
@@ -1203,13 +1206,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const reviewerThreadIdSet = new Set(autoReviewSnapshot.reviewerThreadIds);
   const sidebarThreads = listedThreads.filter(
     (thread) =>
-      thread.environmentId !== primaryEnvironmentId ||
+      thread.environmentId !== workspaceEnvironmentId ||
       !reviewerThreadIdSet.has(thread.id) ||
       threadShellKey(thread) === routeThreadKey,
   );
   const needsHumanCount = sidebarThreads.reduce((count, thread) => {
     if (
-      thread.environmentId !== primaryEnvironmentId ||
+      thread.environmentId !== workspaceEnvironmentId ||
       thread.archivedAt !== null ||
       delegatedUnderParent.has(threadShellKey(thread))
     ) {
@@ -1449,7 +1452,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     matchesAgent: (thread) => {
       if (
         needsHumanOnly &&
-        (thread.environmentId !== primaryEnvironmentId ||
+        (thread.environmentId !== workspaceEnvironmentId ||
           !isAutoReviewNeedsHuman(autoReviewSnapshot.threads[thread.id]))
       ) {
         return false;
@@ -2798,7 +2801,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ) ?? null;
         const reviewSnapshot = readAutoReviewSnapshot();
         const isAutoReviewEligible =
-          thread.environmentId === primaryEnvironmentId &&
+          thread.environmentId === workspaceEnvironmentId &&
           !reviewSnapshot.reviewerThreadIds.includes(thread.id);
         const threadReviewState = isAutoReviewEligible
           ? (reviewSnapshot.threads[thread.id] ?? null)
@@ -3513,7 +3516,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   );
                 })}
               </div>
-              {primaryEnvironmentId !== null ? (
+              {workspaceEnvironmentId !== null ? (
                 <div className="mt-1.5 flex items-center gap-1">
                   <button
                     type="button"
@@ -3940,7 +3943,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             onAcknowledgeWoke={acknowledgeWoke}
                             onFileDropThreads={handleThreadFileDrop}
                             autoReviewState={
-                              thread.environmentId === primaryEnvironmentId
+                              thread.environmentId === workspaceEnvironmentId
                                 ? (autoReviewSnapshot.threads[thread.id] ?? null)
                                 : null
                             }

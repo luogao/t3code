@@ -284,3 +284,86 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
     }),
   );
 });
+
+export interface PreparedEnvironmentHttpRequest {
+  readonly url: string;
+  readonly headers: EnvironmentHttpAuthHeaders;
+  readonly credentials: RequestCredentials;
+  readonly accessToken?: string;
+}
+
+export interface PrepareEnvironmentHttpRequestInput {
+  readonly prepared: Pick<
+    PreparedConnection,
+    "environmentId" | "httpBaseUrl" | "httpAuthorization" | "target"
+  >;
+  readonly method: HttpMethod.HttpMethod;
+  readonly pathname: string;
+  readonly rejectedAccessToken?: string;
+}
+
+/**
+ * Resolves the target URL, auth headers (Bearer or freshly signed DPoP proof), and credential mode
+ * for a raw HTTP or SSE fetch against any connected environment.
+ */
+export const prepareEnvironmentHttpRequest = Effect.fn(
+  "clientRuntime.state.prepareEnvironmentHttpRequest",
+)(function* (
+  input: PrepareEnvironmentHttpRequestInput,
+): Effect.fn.Return<PreparedEnvironmentHttpRequest, RemoteEnvironmentAuthFetchError> {
+  const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
+  const remoteAuthorization = yield* Effect.serviceOption(
+    RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
+  );
+  let httpBaseUrl = input.prepared.httpBaseUrl;
+  let authorization = input.prepared.httpAuthorization;
+
+  if (authorization?._tag === "Dpop") {
+    if (Option.isNone(remoteAuthorization)) {
+      return yield* new RemoteEnvironmentAuthFetchError({
+        ...translatableMessage(
+          msg("No relay authorization service is available for the environment request."),
+        ),
+        cause: input.prepared.target._tag,
+      });
+    }
+    const authFetchError = (cause: unknown) =>
+      new RemoteEnvironmentAuthFetchError({
+        ...translatableMessage(msg("Could not authorize the environment request.")),
+        cause,
+      });
+    const direct = authorization.directConnection;
+    if (direct !== undefined) {
+      authorization = yield* remoteAuthorization.value
+        .authorizeDirectDpopHttp(direct, input.rejectedAccessToken)
+        .pipe(Effect.mapError(authFetchError));
+    } else {
+      const current = yield* remoteAuthorization.value
+        .authorizeDpopHttp({
+          expectedEnvironmentId: input.prepared.environmentId,
+          ...(input.rejectedAccessToken === undefined
+            ? {}
+            : { rejectedAccessToken: input.rejectedAccessToken }),
+        })
+        .pipe(Effect.mapError(authFetchError));
+      if (input.prepared.target._tag === "RelayConnectionTarget") {
+        httpBaseUrl = current.httpBaseUrl;
+      }
+      authorization = current.httpAuthorization;
+    }
+  }
+
+  const requestUrl = new URL(input.pathname, httpBaseUrl).toString();
+  const headers = yield* buildEnvironmentAuthHeaders(
+    authorization,
+    input.method,
+    requestUrl,
+    signer,
+  );
+  return {
+    url: requestUrl,
+    headers,
+    credentials: authorization === null ? "include" : "omit",
+    ...(authorization?._tag === "Dpop" ? { accessToken: authorization.accessToken } : {}),
+  };
+});

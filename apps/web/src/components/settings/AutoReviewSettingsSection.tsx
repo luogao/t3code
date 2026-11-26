@@ -13,8 +13,9 @@ import {
   useAutoReviewSnapshot,
   useAutoReviewSubscription,
 } from "~/autoReview/store";
+import { useWorkspacePreparedConnection } from "~/environments/workspaceHttp";
 import { useProjects } from "~/state/entities";
-import { useEnvironmentProviders, usePrimaryEnvironmentId } from "~/state/environments";
+import { useEnvironmentProviders } from "~/state/environments";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
@@ -28,19 +29,22 @@ const AUTO_MODEL_VALUE = "__auto__";
 export function AutoReviewSettingsSection() {
   const gt = useGT();
   const searchableSetting = useSearchableSetting();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  useAutoReviewSubscription(primaryEnvironmentId !== null);
+  const { environmentId: workspaceEnvironmentId, connectionKey: workspaceConnectionKey } =
+    useWorkspacePreparedConnection();
+  useAutoReviewSubscription(workspaceEnvironmentId, workspaceConnectionKey);
   const snapshot = useAutoReviewSnapshot();
   const { config } = snapshot;
 
   const providersByEnvironment = useEnvironmentProviders();
   const primaryProviders =
-    primaryEnvironmentId === null ? [] : (providersByEnvironment.get(primaryEnvironmentId) ?? []);
+    workspaceEnvironmentId === null
+      ? []
+      : (providersByEnvironment.get(workspaceEnvironmentId) ?? []);
   const allProjects = useProjects();
   const primaryProjects =
-    primaryEnvironmentId === null
+    workspaceEnvironmentId === null
       ? []
-      : allProjects.filter((project) => project.environmentId === primaryEnvironmentId);
+      : allProjects.filter((project) => project.environmentId === workspaceEnvironmentId);
 
   const [saving, setSaving] = useState(false);
   const [draftInstructions, setDraftInstructions] = useState<string | null>(null);
@@ -110,7 +114,7 @@ export function AutoReviewSettingsSection() {
     disabled: gt("Off"),
   };
 
-  const disabled = primaryEnvironmentId === null || saving;
+  const disabled = workspaceEnvironmentId === null || saving;
 
   return (
     <SettingsSection

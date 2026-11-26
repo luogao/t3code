@@ -14,9 +14,10 @@ import { SidebarInset } from "../components/ui/sidebar";
 import { toastManager } from "../components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
+import { useWorkspacePreparedConnection } from "../environments/workspaceHttp";
 import { observeResize } from "../lib/observeResize";
 import { cn } from "../lib/utils";
-import { useEnvironmentProviders, usePrimaryEnvironmentId } from "../state/environments";
+import { useEnvironmentProviders } from "../state/environments";
 import { FridayThreadDrawer } from "./FridayThreadDrawer";
 import {
   buildSmoothElbowPath,
@@ -68,9 +69,10 @@ function collectAvailableCoreModels(
 export function FridayCanvasPage() {
   const gt = useGT();
   const navigate = useNavigate();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { environmentId: workspaceEnvironmentId, connectionKey: workspaceConnectionKey } =
+    useWorkspacePreparedConnection();
   const providersByEnvironment = useEnvironmentProviders();
-  useFridaySubscription(primaryEnvironmentId !== null);
+  useFridaySubscription(workspaceEnvironmentId, workspaceConnectionKey);
   const snapshot = useFridaySnapshot();
 
   const [lens, setLens] = useState<FridayLens>("all");
@@ -119,9 +121,9 @@ export function FridayCanvasPage() {
   } | null>(null);
 
   const availableModels =
-    primaryEnvironmentId === null
+    workspaceEnvironmentId === null
       ? []
-      : collectAvailableCoreModels(providersByEnvironment.get(primaryEnvironmentId) ?? []);
+      : collectAvailableCoreModels(providersByEnvironment.get(workspaceEnvironmentId) ?? []);
 
   const basePositions = computeFridayNodePositions(snapshot.nodes);
   const resolvedPositions = new Map<string, FridayNodePosition>(basePositions);
@@ -1138,7 +1140,7 @@ export function FridayCanvasPage() {
                       </button>
                     ))
                 )}
-                {primaryEnvironmentId !== null && coreNode !== null ? (
+                {workspaceEnvironmentId !== null && coreNode !== null ? (
                   <div className="mt-4 flex justify-end">
                     <button
                       type="button"
@@ -1146,7 +1148,7 @@ export function FridayCanvasPage() {
                         void navigate({
                           to: "/$environmentId/$threadId",
                           params: {
-                            environmentId: primaryEnvironmentId,
+                            environmentId: workspaceEnvironmentId,
                             threadId: coreNode.threadId,
                           },
                         })
@@ -1162,9 +1164,9 @@ export function FridayCanvasPage() {
           ) : null}
 
           {/* Right Slide-Over Native Thread Inspector Drawer */}
-          {primaryEnvironmentId !== null ? (
+          {workspaceEnvironmentId !== null ? (
             <FridayThreadDrawer
-              environmentId={primaryEnvironmentId}
+              environmentId={workspaceEnvironmentId}
               node={selectedNode}
               onClose={() => setSelectedNodeId(null)}
             />

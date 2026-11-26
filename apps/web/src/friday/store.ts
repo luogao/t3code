@@ -1,6 +1,7 @@
 import {
   DEFAULT_FRIDAY_SNAPSHOT,
   FridaySnapshot,
+  type EnvironmentId,
   type FridayDecideThreadInput,
   type FridayNodePosition,
   type FridayRolloverInput,
@@ -13,8 +14,7 @@ import { msg } from "gt-react";
 import { useEffect, useSyncExternalStore } from "react";
 
 import { parseSseChunkBuffer } from "../autoReview/store";
-import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
-import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary/target";
+import { fetchWorkspaceEnvironment } from "../environments/workspaceHttp";
 import { m } from "../i18n/messages";
 
 const decodeSnapshotUnknown = Schema.decodeUnknownSync(FridaySnapshot);
@@ -40,38 +40,6 @@ function readFridaySnapshot(): FridaySnapshot {
   return currentSnapshot;
 }
 
-function isSameOriginBrowserPrimary(): boolean {
-  if (
-    typeof window === "undefined" ||
-    window.desktopBridge !== undefined ||
-    !window.location.origin.startsWith("http")
-  ) {
-    return false;
-  }
-  try {
-    return new URL(resolvePrimaryEnvironmentHttpUrl("/")).origin === window.location.origin;
-  } catch {
-    return false;
-  }
-}
-
-async function primaryFetch(pathname: string, init: RequestInit = {}): Promise<Response> {
-  const url = resolvePrimaryEnvironmentHttpUrl(pathname);
-  const headers = new Headers(init.headers);
-  const sameOrigin = isSameOriginBrowserPrimary();
-  if (!sameOrigin) {
-    const token = await readDesktopPrimaryBearerToken().catch(() => null);
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
-    }
-  }
-  return fetch(url, {
-    ...init,
-    headers,
-    credentials: sameOrigin ? "include" : "omit",
-  });
-}
-
 function tryDecodeSnapshotJson(raw: string): FridaySnapshot | null {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -82,6 +50,8 @@ function tryDecodeSnapshotJson(raw: string): FridaySnapshot | null {
 }
 
 let activeSubscribers = 0;
+let activeEnvironmentId: EnvironmentId | null = null;
+let activeConnectionKey: string | null = null;
 let streamController: AbortController | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -97,9 +67,15 @@ function stopStreamLoop(): void {
 }
 
 function startStreamLoop(backoffMs = 1000): void {
-  if (activeSubscribers <= 0 || typeof window === "undefined" || typeof fetch !== "function") {
+  if (
+    activeSubscribers <= 0 ||
+    activeEnvironmentId === null ||
+    typeof window === "undefined" ||
+    typeof fetch !== "function"
+  ) {
     return;
   }
+  const targetEnvironmentId = activeEnvironmentId;
   stopStreamLoop();
   const controller = new AbortController();
   streamController = controller;
@@ -114,11 +90,15 @@ function startStreamLoop(backoffMs = 1000): void {
 
   void (async () => {
     try {
-      const response = await primaryFetch("/api/friday/stream", {
-        method: "GET",
-        headers: { Accept: "text/event-stream" },
-        signal: controller.signal,
-      });
+      const response = await fetchWorkspaceEnvironment(
+        "/api/friday/stream",
+        {
+          method: "GET",
+          headers: { Accept: "text/event-stream" },
+          signal: controller.signal,
+        },
+        targetEnvironmentId,
+      );
       if (!response.ok || response.body === null) {
         scheduleReconnect(backoffMs);
         return;
@@ -150,21 +130,30 @@ function startStreamLoop(backoffMs = 1000): void {
   })();
 }
 
-export function useFridaySubscription(enabled: boolean): void {
+export function useFridaySubscription(
+  environmentId: EnvironmentId | null,
+  connectionKey: string | null = environmentId,
+): void {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- ref-counted SSE subscription lifecycle for the Friday orchestration graph
   useEffect(() => {
-    if (!enabled) return;
+    if (environmentId === null) return;
+    const connectionChanged =
+      activeEnvironmentId !== environmentId || activeConnectionKey !== connectionKey;
+    activeEnvironmentId = environmentId;
+    activeConnectionKey = connectionKey;
     activeSubscribers += 1;
-    if (activeSubscribers === 1) {
+    if (activeSubscribers === 1 || connectionChanged) {
       startStreamLoop(1000);
     }
     return () => {
       activeSubscribers = Math.max(0, activeSubscribers - 1);
       if (activeSubscribers === 0) {
+        activeEnvironmentId = null;
+        activeConnectionKey = null;
         stopStreamLoop();
       }
     };
-  }, [enabled]);
+  }, [environmentId, connectionKey]);
 }
 
 export function useFridaySnapshot(): FridaySnapshot {
@@ -188,11 +177,15 @@ async function postOrPutSnapshot(
   method: "POST" | "PUT",
   body: unknown,
 ): Promise<FridaySnapshot> {
-  const response = await primaryFetch(pathname, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const response = await fetchWorkspaceEnvironment(
+    pathname,
+    {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    activeEnvironmentId,
+  );
   if (!response.ok) {
     throw new Error(await parseJsonError(response));
   }

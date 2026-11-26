@@ -3,14 +3,14 @@ import {
   DEFAULT_AUTO_REVIEW_SNAPSHOT,
   type AutoReviewConfigPatch,
   type AutoReviewThreadState,
+  type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { msg } from "gt-react";
 import { useEffect, useSyncExternalStore } from "react";
 
-import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
-import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary/target";
+import { fetchWorkspaceEnvironment } from "../environments/workspaceHttp";
 import { m } from "../i18n/messages";
 
 const decodeSnapshotUnknown = Schema.decodeUnknownSync(AutoReviewSnapshot);
@@ -40,38 +40,6 @@ export function isAutoReviewNeedsHuman(
   state: Pick<AutoReviewThreadState, "status"> | null | undefined,
 ): boolean {
   return state?.status === "needs_human" || state?.status === "failed";
-}
-
-function isSameOriginBrowserPrimary(): boolean {
-  if (
-    typeof window === "undefined" ||
-    window.desktopBridge !== undefined ||
-    !window.location.origin.startsWith("http")
-  ) {
-    return false;
-  }
-  try {
-    return new URL(resolvePrimaryEnvironmentHttpUrl("/")).origin === window.location.origin;
-  } catch {
-    return false;
-  }
-}
-
-async function primaryFetch(pathname: string, init: RequestInit = {}): Promise<Response> {
-  const url = resolvePrimaryEnvironmentHttpUrl(pathname);
-  const headers = new Headers(init.headers);
-  const sameOrigin = isSameOriginBrowserPrimary();
-  if (!sameOrigin) {
-    const token = await readDesktopPrimaryBearerToken().catch(() => null);
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
-    }
-  }
-  return fetch(url, {
-    ...init,
-    headers,
-    credentials: sameOrigin ? "include" : "omit",
-  });
 }
 
 /**
@@ -110,6 +78,8 @@ function tryDecodeSnapshotJson(raw: string): AutoReviewSnapshot | null {
 }
 
 let activeSubscribers = 0;
+let activeEnvironmentId: EnvironmentId | null = null;
+let activeConnectionKey: string | null = null;
 let streamController: AbortController | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -125,9 +95,15 @@ function stopStreamLoop(): void {
 }
 
 function startStreamLoop(backoffMs = 1000): void {
-  if (activeSubscribers <= 0 || typeof window === "undefined" || typeof fetch !== "function") {
+  if (
+    activeSubscribers <= 0 ||
+    activeEnvironmentId === null ||
+    typeof window === "undefined" ||
+    typeof fetch !== "function"
+  ) {
     return;
   }
+  const targetEnvironmentId = activeEnvironmentId;
   stopStreamLoop();
   const controller = new AbortController();
   streamController = controller;
@@ -142,11 +118,15 @@ function startStreamLoop(backoffMs = 1000): void {
 
   void (async () => {
     try {
-      const response = await primaryFetch("/api/auto-review/stream", {
-        method: "GET",
-        headers: { Accept: "text/event-stream" },
-        signal: controller.signal,
-      });
+      const response = await fetchWorkspaceEnvironment(
+        "/api/auto-review/stream",
+        {
+          method: "GET",
+          headers: { Accept: "text/event-stream" },
+          signal: controller.signal,
+        },
+        targetEnvironmentId,
+      );
       if (!response.ok || response.body === null) {
         scheduleReconnect(backoffMs);
         return;
@@ -178,21 +158,30 @@ function startStreamLoop(backoffMs = 1000): void {
   })();
 }
 
-export function useAutoReviewSubscription(enabled: boolean): void {
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- ref-counted SSE stream subscription lifecycle for the primary environment's auto-review state
+export function useAutoReviewSubscription(
+  environmentId: EnvironmentId | null,
+  connectionKey: string | null = environmentId,
+): void {
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- ref-counted SSE stream subscription lifecycle for the workspace environment's auto-review state
   useEffect(() => {
-    if (!enabled) return;
+    if (environmentId === null) return;
+    const connectionChanged =
+      activeEnvironmentId !== environmentId || activeConnectionKey !== connectionKey;
+    activeEnvironmentId = environmentId;
+    activeConnectionKey = connectionKey;
     activeSubscribers += 1;
-    if (activeSubscribers === 1) {
+    if (activeSubscribers === 1 || connectionChanged) {
       startStreamLoop(1000);
     }
     return () => {
       activeSubscribers = Math.max(0, activeSubscribers - 1);
       if (activeSubscribers === 0) {
+        activeEnvironmentId = null;
+        activeConnectionKey = null;
         stopStreamLoop();
       }
     };
-  }, [enabled]);
+  }, [environmentId, connectionKey]);
 }
 
 export function useAutoReviewSnapshot(): AutoReviewSnapshot {
@@ -218,11 +207,15 @@ async function parseJsonError(response: Response): Promise<string> {
 export async function updateAutoReviewConfig(
   patch: AutoReviewConfigPatch,
 ): Promise<AutoReviewSnapshot> {
-  const response = await primaryFetch("/api/auto-review/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
+  const response = await fetchWorkspaceEnvironment(
+    "/api/auto-review/config",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+    activeEnvironmentId,
+  );
   if (!response.ok) {
     throw new Error(await parseJsonError(response));
   }
@@ -232,11 +225,12 @@ export async function updateAutoReviewConfig(
 }
 
 export async function triggerThreadAutoReview(threadId: ThreadId): Promise<AutoReviewSnapshot> {
-  const response = await primaryFetch(
+  const response = await fetchWorkspaceEnvironment(
     `/api/auto-review/threads/${encodeURIComponent(threadId)}/review`,
     {
       method: "POST",
     },
+    activeEnvironmentId,
   );
   if (!response.ok) {
     throw new Error(await parseJsonError(response));
@@ -247,9 +241,10 @@ export async function triggerThreadAutoReview(threadId: ThreadId): Promise<AutoR
 }
 
 export async function acknowledgeThreadAutoReview(threadId: ThreadId): Promise<AutoReviewSnapshot> {
-  const response = await primaryFetch(
+  const response = await fetchWorkspaceEnvironment(
     `/api/auto-review/threads/${encodeURIComponent(threadId)}/acknowledge`,
     { method: "POST" },
+    activeEnvironmentId,
   );
   if (!response.ok) {
     throw new Error(await parseJsonError(response));
