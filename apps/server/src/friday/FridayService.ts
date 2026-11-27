@@ -23,6 +23,7 @@ import {
   type ProjectId,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -68,8 +69,10 @@ const GRAPH_RELEVANT_EVENT_TYPES = new Set<string>([
   "run.updated",
   "subagent.updated",
   "runtime-request.updated",
-  "message.created",
+  "message.updated",
 ]);
+
+const STREAMING_MESSAGE_PUBLISH_MIN_INTERVAL_MS = 350;
 
 const MAX_GRAPH_NODES = 48;
 const MAX_GRAPH_DEPTH = 3;
@@ -151,13 +154,22 @@ function trimPreview(text: string | null | undefined, maxChars = 96): string | n
   return `${collapsed.slice(0, maxChars - 1)}...`;
 }
 
+function stripFridayPromptWrapper(text: string): string {
+  return text
+    .replace(/<friday_context\b[^>]*>[\s\S]*?<\/friday_context>\s*/gi, "")
+    .replace(/<friday_shift_handoff\b[^>]*>[\s\S]*?<\/friday_shift_handoff>\s*/gi, "")
+    .trim();
+}
+
 function latestMessageText(
   messages: ReadonlyArray<OrchestrationV2ConversationMessage>,
+  maxChars = 220,
 ): string | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const candidate = messages[index];
     if (candidate === undefined) continue;
-    const preview = trimPreview(candidate.text, 120);
+    const cleaned = stripFridayPromptWrapper(candidate.text);
+    const preview = trimPreview(cleaned, maxChars);
     if (preview !== null) return preview;
   }
   return null;
@@ -340,12 +352,28 @@ const make = Effect.gen(function* () {
         coreContextUsagePercent = estimateContextUsagePercent(coreRec.runs, coreRec.messages);
         const coreProjectTitle =
           projectTitleById.get(coreRec.thread.projectId) ?? coreRec.thread.projectId;
-        const corePreview = latestMessageText(coreRec.messages);
+        const corePreview = latestMessageText(coreRec.messages, 220);
         const coreDecision = derivePendingDecision({
           runtimeRequests: coreRec.runtimeRequests,
           autoReview: undefined,
           latestPreview: corePreview,
         });
+        const coreIsRunning = coreRec.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status));
+        const coreLatestRun = coreRec.runs[coreRec.runs.length - 1];
+        const coreStatus: FridayGraphNodeStatus =
+          coreDecision !== null
+            ? "needs_human"
+            : coreIsRunning
+              ? "running"
+              : coreLatestRun?.status === "failed"
+                ? "failed"
+                : "core";
+        const coreStatusDetail =
+          coreStatus === "running"
+            ? `Shift ${String(persisted.config.shiftNumber)} · Thinking...`
+            : coreStatus === "failed"
+              ? `Shift ${String(persisted.config.shiftNumber)} · Run failed`
+              : `Shift ${String(persisted.config.shiftNumber)} · ${coreRec.thread.modelSelection.model}`;
         nodes.push({
           id: coreRec.thread.id,
           threadId: coreRec.thread.id,
@@ -357,8 +385,8 @@ const make = Effect.gen(function* () {
           branch: coreRec.thread.branch,
           providerInstanceId: coreRec.thread.modelSelection.instanceId,
           model: coreRec.thread.modelSelection.model,
-          status: coreDecision !== null ? "needs_human" : "core",
-          statusDetail: `Shift ${String(persisted.config.shiftNumber)} · ${coreRec.thread.modelSelection.model}`,
+          status: coreStatus,
+          statusDetail: coreStatusDetail,
           updatedAt: IsoDateTime.make(DateTime.formatIso(coreRec.thread.updatedAt)),
           position: persisted.config.nodePositions[coreRec.thread.id] ?? null,
           pendingDecision: coreDecision,
@@ -848,10 +876,19 @@ const make = Effect.gen(function* () {
     return yield* publishSnapshot;
   });
 
+  let lastStreamingPublishMs = 0;
+
   const handleDomainEvent = Effect.fn("FridayService.handleDomainEvent")(function* (
     event: OrchestrationV2DomainEvent,
   ) {
     if (!GRAPH_RELEVANT_EVENT_TYPES.has(event.type)) return;
+    if (event.type === "message.updated" && event.payload.streaming) {
+      const nowMs = yield* Clock.currentTimeMillis;
+      if (nowMs - lastStreamingPublishMs < STREAMING_MESSAGE_PUBLISH_MIN_INTERVAL_MS) {
+        return;
+      }
+      lastStreamingPublishMs = nowMs;
+    }
     yield* publishSnapshot.pipe(
       Effect.catchCause((cause) => Effect.logWarning("friday.refresh-failed", { cause })),
     );

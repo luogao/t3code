@@ -260,6 +260,26 @@ describe("FridayService", () => {
             expect(harness.launched).toHaveLength(1);
             expect(harness.launched[0]!.initialMessage?.text).toContain("project:openmotion");
             expect(harness.launched[0]!.initialMessage?.text).toContain("project:t3code");
+            const runningCoreNode = afterFirst.nodes.find((node) => node.kind === "core");
+            expect(runningCoreNode?.status).toBe("running");
+            expect(runningCoreNode?.latestMessagePreview).toBe(
+              "Audit openmotion and t3code open defects in parallel.",
+            );
+
+            // Once Friday replies and run finishes, core status returns to "core" with assistant reply preview.
+            harness.records.get(coreThreadId)!.runs = [
+              { id: RunId.make("run:core:1"), status: "completed" } as OrchestrationV2Run,
+            ];
+            harness.records.get(coreThreadId)!.messages.push({
+              role: "assistant",
+              text: "Hello! Ready across openmotion and t3code.",
+            } as unknown as OrchestrationV2ConversationMessage);
+            const afterReply = yield* service.getSnapshot;
+            const repliedCoreNode = afterReply.nodes.find((node) => node.kind === "core");
+            expect(repliedCoreNode?.status).toBe("core");
+            expect(repliedCoreNode?.latestMessagePreview).toBe(
+              "Hello! Ready across openmotion and t3code.",
+            );
 
             // Second prompt dispatches onto the SAME core thread (never creates a second core thread).
             yield* service.sendPrompt({ text: "Prioritize openmotion render retries first." });

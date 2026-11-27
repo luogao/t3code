@@ -7,13 +7,21 @@ import type {
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { T, useGT, Var } from "gt-react";
-import { ArrowUpIcon, CheckIcon, MinusIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  CheckIcon,
+  MessageSquareIcon,
+  MinusIcon,
+  PlusIcon,
+  RotateCcwIcon,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { SidebarInset } from "../components/ui/sidebar";
 import { toastManager } from "../components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
+import { isElectron } from "../env";
 import { useWorkspacePreparedConnection } from "../environments/workspaceHttp";
 import { observeResize } from "../lib/observeResize";
 import { cn } from "../lib/utils";
@@ -97,6 +105,8 @@ export function FridayCanvasPage() {
   const [camera, setCamera] = useState<FridayCamera>({ x: 0, y: 0, scale: 1 });
   const [isPanning, setIsPanning] = useState(false);
   const hasAutoFittedRef = useRef(false);
+  const userAdjustedCameraRef = useRef(false);
+  const lastStageSizeRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
   const stageRef = useRef<HTMLDivElement | null>(null);
 
   const panStateRef = useRef<{
@@ -106,7 +116,8 @@ export function FridayCanvasPage() {
     startY: number;
     origX: number;
     origY: number;
-  }>({ active: false, pointerId: -1, startX: 0, startY: 0, origX: 0, origY: 0 });
+    moved: boolean;
+  }>({ active: false, pointerId: -1, startX: 0, startY: 0, origX: 0, origY: 0, moved: false });
 
   const dragNodeRef = useRef<{
     nodeId: string;
@@ -136,6 +147,8 @@ export function FridayCanvasPage() {
     if (el === null) return;
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
+    userAdjustedCameraRef.current = false;
+    lastStageSizeRef.current = { width: rect.width, height: rect.height };
     setCamera(
       computeAutoFitCamera({
         positions: positionsMap,
@@ -145,13 +158,21 @@ export function FridayCanvasPage() {
     );
   };
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- initial viewport centering and resize tracking for the infinite canvas camera
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- initial viewport centering and container resize tracking without snapping camera back during SSE updates
   useEffect(() => {
     const el = stageRef.current;
     if (el === null) return;
-    const fitToElement = () => {
+    const fitOnSizeChange = () => {
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
+      const sizeChanged =
+        Math.abs(rect.width - lastStageSizeRef.current.width) > 1 ||
+        Math.abs(rect.height - lastStageSizeRef.current.height) > 1;
+      if (hasAutoFittedRef.current && (!sizeChanged || userAdjustedCameraRef.current)) {
+        return;
+      }
+      hasAutoFittedRef.current = true;
+      lastStageSizeRef.current = { width: rect.width, height: rect.height };
       setCamera(
         computeAutoFitCamera({
           positions: computeFridayNodePositions(snapshot.nodes),
@@ -160,16 +181,49 @@ export function FridayCanvasPage() {
         }),
       );
     };
-    if (!hasAutoFittedRef.current) {
-      hasAutoFittedRef.current = true;
-      fitToElement();
-    }
+    fitOnSizeChange();
     return observeResize(el, () => {
       if (!panStateRef.current.active && dragNodeRef.current === null) {
-        fitToElement();
+        fitOnSizeChange();
       }
     });
   }, [snapshot.nodes]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Escape key dismisses active modals, list view, or slide-over inspector drawer
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (memoryModalOpen) {
+        event.preventDefault();
+        setMemoryModalOpen(false);
+        return;
+      }
+      if (rolloverModalOpen) {
+        event.preventDefault();
+        setRolloverModalOpen(false);
+        return;
+      }
+      if (classicListOpen) {
+        event.preventDefault();
+        setClassicListOpen(false);
+        return;
+      }
+      if (
+        selectedNodeId !== null &&
+        !(
+          event.target instanceof HTMLElement &&
+          (event.target.tagName === "INPUT" ||
+            event.target.tagName === "TEXTAREA" ||
+            event.target.isContentEditable)
+        )
+      ) {
+        event.preventDefault();
+        setSelectedNodeId(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [classicListOpen, memoryModalOpen, rolloverModalOpen, selectedNodeId]);
 
   const workers = snapshot.nodes.filter((node) => node.kind === "worker");
   const activeCount = workers.filter((node) => node.status !== "completed").length;
@@ -242,15 +296,15 @@ export function FridayCanvasPage() {
     if (text.length === 0 || submitting) return;
     setSubmitting(true);
     try {
-      await sendFridayPrompt({ text });
+      const updated = await sendFridayPrompt({ text });
       if (textOverride === undefined) {
         setComposerText("");
       }
       setLens("all");
-      toastManager.add({
-        type: "info",
-        title: gt("Dispatched to Friday"),
-      });
+      if (updated.coreThreadId !== null) {
+        setClassicListOpen(false);
+        setSelectedNodeId(updated.coreThreadId);
+      }
     } catch (error) {
       toastManager.add({
         type: "error",
@@ -328,7 +382,14 @@ export function FridayCanvasPage() {
   };
 
   const handleViewportPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if ((event.target as HTMLElement).closest("[data-friday-node]")) return;
+    if (event.button !== 0) return;
+    if (
+      (event.target as HTMLElement).closest(
+        "[data-friday-node], button, input, textarea, select, a, [role='button']",
+      )
+    ) {
+      return;
+    }
     panStateRef.current = {
       active: true,
       pointerId: event.pointerId,
@@ -336,6 +397,7 @@ export function FridayCanvasPage() {
       startY: event.clientY,
       origX: camera.x,
       origY: camera.y,
+      moved: false,
     };
     setIsPanning(true);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -344,26 +406,37 @@ export function FridayCanvasPage() {
   const handleViewportPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const pan = panStateRef.current;
     if (!pan.active || pan.pointerId !== event.pointerId) return;
+    const dx = event.clientX - pan.startX;
+    const dy = event.clientY - pan.startY;
+    if (!pan.moved && Math.hypot(dx, dy) > 4) {
+      pan.moved = true;
+      userAdjustedCameraRef.current = true;
+    }
     setCamera((current) => ({
       ...current,
-      x: pan.origX + (event.clientX - pan.startX),
-      y: pan.origY + (event.clientY - pan.startY),
+      x: pan.origX + dx,
+      y: pan.origY + dy,
     }));
   };
 
   const handleViewportPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     const pan = panStateRef.current;
     if (!pan.active || pan.pointerId !== event.pointerId) return;
+    const wasMoved = pan.moved;
     panStateRef.current.active = false;
     setIsPanning(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!wasMoved && selectedNodeId !== null) {
+      setSelectedNodeId(null);
     }
   };
 
   const handleViewportWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const el = stageRef.current;
     if (el === null) return;
+    userAdjustedCameraRef.current = true;
     const rect = el.getBoundingClientRect();
     const factor = event.deltaY < 0 ? 1.08 : 0.92;
     setCamera((current) => {
@@ -405,10 +478,11 @@ export function FridayCanvasPage() {
     if (drag === null || drag.nodeId !== node.id || drag.pointerId !== event.pointerId) return;
     const dx = (event.clientX - drag.startX) / camera.scale;
     const dy = (event.clientY - drag.startY) / camera.scale;
-    if (!drag.moved && Math.hypot(dx, dy) > 4) {
+    if (node.kind === "core") return;
+    if (!drag.moved && Math.hypot(dx, dy) > 6) {
       drag.moved = true;
     }
-    if (drag.moved && node.kind !== "core") {
+    if (drag.moved) {
       drag.latestX = Math.round(drag.origX + dx);
       drag.latestY = Math.round(drag.origY + dy);
       setDragPositions((current) => ({
@@ -462,8 +536,15 @@ export function FridayCanvasPage() {
     <TooltipProvider delay={200}>
       <SidebarInset className="relative flex h-dvh min-h-0 flex-col overflow-hidden">
         {/* Minimal Editorial Top Header */}
-        <WorkspacePageHeader className="relative z-20 justify-between border-b border-transparent bg-transparent">
-          <div className="flex items-center gap-0.5" role="group" aria-label={gt("Friday filter")}>
+        <WorkspacePageHeader
+          electron={isElectron}
+          className="relative z-20 justify-between border-b border-transparent bg-transparent"
+        >
+          <div
+            className="flex items-center gap-0.5 [-webkit-app-region:no-drag]"
+            role="group"
+            aria-label={gt("Friday filter")}
+          >
             <button
               type="button"
               onClick={() => setLens("all")}
@@ -520,7 +601,34 @@ export function FridayCanvasPage() {
             </button>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 [-webkit-app-region:no-drag]">
+            {coreNode !== null ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setClassicListOpen(false);
+                  setSelectedNodeId((current) => (current === coreNode.id ? null : coreNode.id));
+                }}
+                className={cn(
+                  "inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  selectedNodeId === coreNode.id
+                    ? "bg-foreground/10 text-foreground"
+                    : "text-muted-foreground hover:bg-foreground/6 hover:text-foreground",
+                )}
+              >
+                {coreNode.status === "running" ? (
+                  <span
+                    aria-hidden
+                    className="size-2.5 shrink-0 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground"
+                  />
+                ) : (
+                  <MessageSquareIcon aria-hidden className="size-3.5 shrink-0" />
+                )}
+                <span>
+                  <T>Chat</T>
+                </span>
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => {
@@ -546,457 +654,511 @@ export function FridayCanvasPage() {
           </div>
         </WorkspacePageHeader>
 
-        {/* Infinite Spatial Drafting Canvas */}
-        <div
-          ref={stageRef}
-          className={cn(
-            "relative flex-1 overflow-hidden select-none touch-none",
-            isPanning ? "cursor-grabbing" : "cursor-grab",
-          )}
-          onPointerDown={handleViewportPointerDown}
-          onPointerMove={handleViewportPointerMove}
-          onPointerUp={handleViewportPointerUp}
-          onWheel={handleViewportWheel}
-        >
-          {/* Ultra-faint architectural monochrome dot grid */}
+        {/* Spatial Workspace Container (overlays sit as siblings outside stageRef so pan/zoom capture never hijacks HUD or drawer clicks) */}
+        <div className="relative flex-1 overflow-hidden">
+          {/* Infinite Spatial Drafting Canvas */}
           <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 opacity-35"
-            style={{
-              backgroundImage:
-                "radial-gradient(color-mix(in srgb, var(--foreground) 15%, transparent) 0.75px, transparent 0.75px)",
-              backgroundSize: `${gridStep}px ${gridStep}px`,
-              backgroundPosition: `${camera.x}px ${camera.y}px`,
-              maskImage: "radial-gradient(ellipse 78% 74% at 50% 48%, black 35%, transparent 96%)",
-              WebkitMaskImage:
-                "radial-gradient(ellipse 78% 74% at 50% 48%, black 35%, transparent 96%)",
-            }}
-          />
-
-          {/* Transformed Spatial World */}
-          <div
-            className="absolute top-0 left-0 h-0 w-0 origin-top-left"
-            style={{
-              transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`,
-            }}
+            ref={stageRef}
+            className={cn(
+              "absolute inset-0 overflow-hidden select-none touch-none",
+              isPanning ? "cursor-grabbing" : "cursor-grab",
+            )}
+            onPointerDown={handleViewportPointerDown}
+            onPointerMove={handleViewportPointerMove}
+            onPointerUp={handleViewportPointerUp}
+            onPointerCancel={handleViewportPointerUp}
+            onWheel={handleViewportWheel}
           >
-            {/* Orthogonal 1px Hairline Connectors */}
-            <svg
+            {/* Ultra-faint architectural monochrome dot grid */}
+            <div
               aria-hidden
-              viewBox="-1600 -1200 3200 2400"
-              className="pointer-events-none absolute -top-[1200px] -left-[1600px] h-[2400px] w-[3200px] overflow-visible"
+              className="pointer-events-none absolute inset-0 opacity-35"
+              style={{
+                backgroundImage:
+                  "radial-gradient(color-mix(in srgb, var(--foreground) 15%, transparent) 0.75px, transparent 0.75px)",
+                backgroundSize: `${gridStep}px ${gridStep}px`,
+                backgroundPosition: `${camera.x}px ${camera.y}px`,
+                maskImage:
+                  "radial-gradient(ellipse 78% 74% at 50% 48%, black 35%, transparent 96%)",
+                WebkitMaskImage:
+                  "radial-gradient(ellipse 78% 74% at 50% 48%, black 35%, transparent 96%)",
+              }}
+            />
+
+            {/* Transformed Spatial World */}
+            <div
+              className="absolute top-0 left-0 h-0 w-0 origin-top-left"
+              style={{
+                transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`,
+              }}
             >
-              {snapshot.edges.map((edge) => {
-                const sourceNode = snapshot.nodes.find((n) => n.id === edge.sourceId);
-                const targetNode = snapshot.nodes.find((n) => n.id === edge.targetId);
-                const sourcePos = resolvedPositions.get(edge.sourceId);
-                const targetPos = resolvedPositions.get(edge.targetId);
-                if (
-                  sourceNode === undefined ||
-                  targetNode === undefined ||
-                  sourcePos === undefined ||
-                  targetPos === undefined
-                ) {
-                  return null;
-                }
-                const visible = isNodeVisible(targetNode);
-                const highlighted =
-                  hoveredNodeId === targetNode.id || selectedNodeId === targetNode.id;
-                const { a, b } = computeEdgeEndpoints({
-                  sourceNode,
-                  sourcePos,
-                  targetNode,
-                  targetPos,
-                });
-                const d = buildSmoothElbowPath(a, b);
-                const wireClass = highlighted
-                  ? "stroke-foreground/55"
-                  : targetNode.status === "needs_human"
-                    ? "stroke-foreground/25"
-                    : targetNode.status === "completed"
-                      ? "stroke-foreground/10"
-                      : "stroke-foreground/15";
-                return (
-                  <g key={edge.id} style={{ opacity: visible ? 1 : 0.14 }}>
-                    <path
-                      d={d}
-                      fill="none"
-                      className={wireClass}
-                      strokeWidth={
-                        highlighted ? 1.4 : targetNode.status === "needs_human" ? 1.25 : 1
-                      }
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeDasharray={edge.kind === "review" ? "2.5 3.5" : undefined}
-                    />
-                    {targetNode.kind === "worker" && targetNode.status === "needs_human" ? (
-                      <circle
-                        cx={b.x}
-                        cy={b.y}
-                        r={3.5}
-                        className="fill-destructive stroke-background"
-                        strokeWidth={1.5}
-                      />
-                    ) : targetNode.kind === "worker" && sourceNode.kind === "core" ? (
-                      <circle
-                        cx={a.x}
-                        cy={a.y}
-                        r={2.2}
-                        className="fill-background stroke-foreground/30"
-                        strokeWidth={1.25}
-                      />
-                    ) : null}
-                  </g>
-                );
-              })}
-            </svg>
-
-            {/* Center Friday Hub (Standby Anchor before first prompt) */}
-            {coreNode === null ? (
-              <div
-                data-friday-node="core-empty"
-                style={{ left: "0px", top: "12px" }}
-                className="absolute z-10 flex w-64 -translate-x-1/2 -translate-y-1/2 flex-col gap-2.5 rounded-2xl border border-border/50 bg-popover px-4 py-3.5 shadow-xl"
+              {/* Orthogonal 1px Hairline Connectors */}
+              <svg
+                aria-hidden
+                viewBox="-1600 -1200 3200 2400"
+                className="pointer-events-none absolute -top-[1200px] -left-[1600px] h-[2400px] w-[3200px] overflow-visible"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      aria-hidden
-                      className="inline-flex size-4.5 shrink-0 items-center justify-center rounded-sm bg-foreground text-background"
-                    >
-                      <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor">
-                        <rect x="1" y="1" width="4" height="4" rx="1" />
-                        <rect x="7" y="1" width="4" height="4" rx="1" opacity="0.45" />
-                        <rect x="1" y="7" width="4" height="4" rx="1" opacity="0.45" />
-                        <rect x="7" y="7" width="4" height="4" rx="1" />
-                      </svg>
-                    </span>
-                    <span className="text-sm font-semibold tracking-tight text-foreground">
-                      <T>Friday</T>
-                    </span>
-                  </div>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <button
-                          type="button"
-                          onClick={() => void handleCycleCoreModel()}
-                          className="max-w-32 cursor-pointer truncate rounded bg-foreground/6 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground transition-colors hover:bg-foreground/12 hover:text-foreground"
-                        >
-                          {activeModelLabel}
-                        </button>
-                      }
-                    />
-                    <TooltipPopup>
-                      <T>Switch Friday core model</T>
-                    </TooltipPopup>
-                  </Tooltip>
-                </div>
-                <div className="text-xs leading-relaxed text-muted-foreground">
-                  <T>
-                    Ready across{" "}
-                    <strong className="font-semibold text-foreground">
-                      <Var>{snapshot.projects.length}</Var>
-                    </strong>{" "}
-                    local projects. Send an instruction below to launch your hub.
-                  </T>
-                </div>
-                <div className="flex items-center justify-between border-t border-foreground/8 pt-2">
-                  <span className="font-mono text-3xs text-muted-foreground">
-                    <T>
-                      Shift <Var>{snapshot.config.shiftNumber}</Var> · standby
-                    </T>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMemoryDraft(snapshot.memoryMarkdown);
-                      setMemoryModalOpen(true);
-                    }}
-                    className="cursor-pointer rounded px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
-                  >
-                    <T>Playbook →</T>
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {/* Live Spatial Nodes */}
-            {snapshot.nodes.map((node) => {
-              const pos = resolvedPositions.get(node.id) ?? { x: 0, y: 0 };
-              const visible = isNodeVisible(node);
-              const selected = selectedNodeId === node.id;
-
-              if (node.kind === "core") {
-                return (
-                  <div
-                    key={node.id}
-                    data-friday-node={node.id}
-                    style={{ left: `${pos.x}px`, top: `${pos.y}px` }}
-                    onPointerEnter={() => setHoveredNodeId(node.id)}
-                    onPointerLeave={() => setHoveredNodeId((cur) => (cur === node.id ? null : cur))}
-                    onPointerDown={(event) => startNodePointer(event, node, pos)}
-                    onPointerMove={(event) => moveNodePointer(event, node)}
-                    onPointerUp={(event) => endNodePointer(event, node)}
-                    className={cn(
-                      "absolute z-10 flex w-60 -translate-x-1/2 -translate-y-1/2 cursor-pointer flex-col gap-2 rounded-2xl border border-border/50 bg-popover px-3.5 py-3 shadow-xl transition-shadow",
-                      selected && "border-foreground/25",
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          aria-hidden
-                          className="inline-flex size-4.5 shrink-0 items-center justify-center rounded-sm bg-foreground text-background"
-                        >
-                          <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor">
-                            <rect x="1" y="1" width="4" height="4" rx="1" />
-                            <rect x="7" y="1" width="4" height="4" rx="1" opacity="0.45" />
-                            <rect x="1" y="7" width="4" height="4" rx="1" opacity="0.45" />
-                            <rect x="7" y="7" width="4" height="4" rx="1" />
-                          </svg>
-                        </span>
-                        <span className="text-sm font-semibold tracking-tight text-foreground">
-                          {node.title}
-                        </span>
-                      </div>
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <button
-                              type="button"
-                              onClick={() => void handleCycleCoreModel()}
-                              className="max-w-28 cursor-pointer truncate rounded bg-foreground/6 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground transition-colors hover:bg-foreground/12 hover:text-foreground"
-                            >
-                              {node.model}
-                            </button>
-                          }
+                {snapshot.edges.map((edge) => {
+                  const sourceNode = snapshot.nodes.find((n) => n.id === edge.sourceId);
+                  const targetNode = snapshot.nodes.find((n) => n.id === edge.targetId);
+                  const sourcePos = resolvedPositions.get(edge.sourceId);
+                  const targetPos = resolvedPositions.get(edge.targetId);
+                  if (
+                    sourceNode === undefined ||
+                    targetNode === undefined ||
+                    sourcePos === undefined ||
+                    targetPos === undefined
+                  ) {
+                    return null;
+                  }
+                  const visible = isNodeVisible(targetNode);
+                  const highlighted =
+                    hoveredNodeId === targetNode.id || selectedNodeId === targetNode.id;
+                  const { a, b } = computeEdgeEndpoints({
+                    sourceNode,
+                    sourcePos,
+                    targetNode,
+                    targetPos,
+                  });
+                  const d = buildSmoothElbowPath(a, b);
+                  const wireClass = highlighted
+                    ? "stroke-foreground/55"
+                    : targetNode.status === "needs_human"
+                      ? "stroke-foreground/25"
+                      : targetNode.status === "completed"
+                        ? "stroke-foreground/10"
+                        : "stroke-foreground/15";
+                  return (
+                    <g key={edge.id} style={{ opacity: visible ? 1 : 0.14 }}>
+                      <path
+                        d={d}
+                        fill="none"
+                        className={wireClass}
+                        strokeWidth={
+                          highlighted ? 1.4 : targetNode.status === "needs_human" ? 1.25 : 1
+                        }
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeDasharray={edge.kind === "review" ? "2.5 3.5" : undefined}
+                      />
+                      {targetNode.kind === "worker" && targetNode.status === "needs_human" ? (
+                        <circle
+                          cx={b.x}
+                          cy={b.y}
+                          r={3.5}
+                          className="fill-destructive stroke-background"
+                          strokeWidth={1.5}
                         />
-                        <TooltipPopup>
-                          <T>Switch Friday core model</T>
-                        </TooltipPopup>
-                      </Tooltip>
-                    </div>
+                      ) : targetNode.kind === "worker" && sourceNode.kind === "core" ? (
+                        <circle
+                          cx={a.x}
+                          cy={a.y}
+                          r={2.2}
+                          className="fill-background stroke-foreground/30"
+                          strokeWidth={1.25}
+                        />
+                      ) : null}
+                    </g>
+                  );
+                })}
+              </svg>
 
-                    <div className="text-xs text-muted-foreground">
-                      {needsHumanCount > 0 ? (
-                        <T>
-                          <strong className="font-semibold text-foreground">
-                            <Var>{activeCount}</Var>
-                          </strong>{" "}
-                          active ·{" "}
-                          <strong className="font-semibold text-foreground">
-                            <Var>{needsHumanCount}</Var>
-                          </strong>{" "}
-                          needs you
-                        </T>
-                      ) : (
-                        <T>
-                          <strong className="font-semibold text-foreground">
-                            <Var>{activeCount}</Var>
-                          </strong>{" "}
-                          active · all clear
-                        </T>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 border-t border-foreground/8 pt-2">
-                      <div className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className="shrink-0 font-mono text-3xs tabular-nums text-muted-foreground">
-                          <T>
-                            Shift <Var>{snapshot.config.shiftNumber}</Var> · <Var>{coreUsage}</Var>%
-                          </T>
-                        </span>
-                        <span className="block h-0.5 flex-1 overflow-hidden rounded-full bg-foreground/10">
-                          <span
-                            className={cn(
-                              "block h-full rounded-full transition-[width]",
-                              coreUsage >= 65 ? "bg-warning" : "bg-foreground/65",
-                            )}
-                            style={{ width: `${Math.min(100, Math.max(4, coreUsage))}%` }}
-                          />
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setRolloverModalOpen(true)}
-                        className="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
-                      >
-                        <T>Shift →</T>
-                      </button>
-                    </div>
-                  </div>
-                );
-              }
-
-              if (node.kind === "reviewer") {
-                const dotClass =
-                  node.status === "needs_human"
-                    ? "bg-destructive"
-                    : node.status === "completed"
-                      ? "bg-success"
-                      : "bg-warning";
-                return (
-                  <div
-                    key={node.id}
-                    data-friday-node={node.id}
-                    style={{ left: `${pos.x}px`, top: `${pos.y}px` }}
-                    onPointerEnter={() => setHoveredNodeId(node.id)}
-                    onPointerLeave={() => setHoveredNodeId((cur) => (cur === node.id ? null : cur))}
-                    onPointerDown={(event) => startNodePointer(event, node, pos)}
-                    onPointerMove={(event) => moveNodePointer(event, node)}
-                    onPointerUp={(event) => endNodePointer(event, node)}
-                    className={cn(
-                      "absolute z-5 inline-flex -translate-x-2.5 -translate-y-1/2 cursor-pointer items-center gap-1.5 rounded-md px-2 py-0.5 font-mono text-3xs whitespace-nowrap text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground",
-                      selected && "bg-foreground/8 text-foreground",
-                      !visible && "pointer-events-none opacity-15",
-                    )}
-                  >
-                    <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", dotClass)} />
-                    <span>
-                      ↳ {node.title} · {node.statusDetail}
-                    </span>
-                  </div>
-                );
-              }
-
-              if (node.status === "needs_human" && node.pendingDecision !== null) {
-                const decision = node.pendingDecision;
-                const isBusy = decidingNodeId === node.id;
-                return (
-                  <div
-                    key={node.id}
-                    data-friday-node={node.id}
-                    style={{ left: `${pos.x}px`, top: `${pos.y}px` }}
-                    onPointerEnter={() => setHoveredNodeId(node.id)}
-                    onPointerLeave={() => setHoveredNodeId((cur) => (cur === node.id ? null : cur))}
-                    onPointerDown={(event) => startNodePointer(event, node, pos)}
-                    onPointerMove={(event) => moveNodePointer(event, node)}
-                    onPointerUp={(event) => endNodePointer(event, node)}
-                    className={cn(
-                      "absolute z-10 flex w-60 -translate-x-1/2 -translate-y-1/2 cursor-pointer flex-col gap-1.5 rounded-xl border border-border/50 bg-popover px-3.5 py-3 shadow-lg transition-shadow",
-                      selected && "border-foreground/25",
-                      !visible && "pointer-events-none opacity-15",
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-2 text-3xs text-muted-foreground">
-                      <span className="inline-flex items-center gap-1.5 font-semibold text-foreground">
-                        <span aria-hidden className="size-1.5 rounded-full bg-destructive" />
-                        <span className="truncate">{decision.kicker}</span>
-                      </span>
-                      <span className="truncate font-mono">{node.projectTitle}</span>
-                    </div>
-                    <div className="truncate text-sm font-semibold tracking-tight text-foreground">
-                      {node.title}
-                    </div>
-                    <div className="line-clamp-2 text-2xs leading-snug text-muted-foreground">
-                      {decision.question}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                      {decision.options.length > 0 ? (
-                        decision.options.map((option, index) => (
-                          <button
-                            key={option.id}
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => void handleInlineDecision(node, option)}
-                            className={cn(
-                              "cursor-pointer rounded-md px-2.5 py-1 text-2xs font-medium transition-opacity disabled:opacity-50",
-                              index === 0
-                                ? "bg-foreground text-background hover:opacity-85"
-                                : "bg-foreground/8 text-foreground hover:bg-foreground/14",
-                            )}
-                          >
-                            {option.label}
-                          </button>
-                        ))
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setSelectedNodeId(node.id)}
-                          className="cursor-pointer rounded-md bg-foreground px-2.5 py-1 text-2xs font-medium text-background transition-opacity hover:opacity-85"
-                        >
-                          <T>Answer →</T>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              }
-
-              // Calm borderless ambient stream node (running / reviewing / completed / failed)
-              const alignLeft = pos.x < -12;
-              return (
+              {/* Center Friday Hub (Standby Anchor before first prompt) */}
+              {coreNode === null ? (
                 <div
-                  key={node.id}
-                  data-friday-node={node.id}
-                  style={{
-                    left: `${pos.x}px`,
-                    top: `${pos.y}px`,
-                    transform: alignLeft
-                      ? "translate(calc(-100% + 16px), -50%)"
-                      : "translate(-16px, -50%)",
-                  }}
-                  onPointerEnter={() => setHoveredNodeId(node.id)}
-                  onPointerLeave={() => setHoveredNodeId((cur) => (cur === node.id ? null : cur))}
-                  onPointerDown={(event) => startNodePointer(event, node, pos)}
-                  onPointerMove={(event) => moveNodePointer(event, node)}
-                  onPointerUp={(event) => endNodePointer(event, node)}
-                  className={cn(
-                    "absolute z-5 flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-foreground/5",
-                    alignLeft && "flex-row-reverse text-right",
-                    selected && "bg-foreground/8",
-                    !visible && "pointer-events-none opacity-15",
-                  )}
+                  data-friday-node="core-empty"
+                  style={{ left: "0px", top: "12px" }}
+                  className="absolute z-10 flex w-64 -translate-x-1/2 -translate-y-1/2 flex-col gap-2.5 rounded-2xl border border-border/50 bg-popover px-4 py-3.5 shadow-xl"
                 >
-                  <span className="relative z-10 inline-flex h-4.5 w-3.5 shrink-0 items-center justify-center">
-                    {node.status === "completed" ? (
-                      <span className="inline-flex size-3.5 items-center justify-center rounded-full bg-background">
-                        <CheckIcon aria-hidden className="size-3 text-success" />
-                      </span>
-                    ) : node.status === "failed" ? (
-                      <span className="size-2 rounded-full bg-destructive" />
-                    ) : (
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
                       <span
                         aria-hidden
-                        className={cn(
-                          "size-3 animate-spin rounded-full border-2 border-foreground/15 bg-background",
-                          node.status === "reviewing" ? "border-t-warning" : "border-t-foreground",
-                        )}
+                        className="inline-flex size-4.5 shrink-0 items-center justify-center rounded-sm bg-foreground text-background"
+                      >
+                        <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor">
+                          <rect x="1" y="1" width="4" height="4" rx="1" />
+                          <rect x="7" y="1" width="4" height="4" rx="1" opacity="0.45" />
+                          <rect x="1" y="7" width="4" height="4" rx="1" opacity="0.45" />
+                          <rect x="7" y="7" width="4" height="4" rx="1" />
+                        </svg>
+                      </span>
+                      <span className="text-sm font-semibold tracking-tight text-foreground">
+                        <T>Friday</T>
+                      </span>
+                    </div>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <button
+                            type="button"
+                            onClick={() => void handleCycleCoreModel()}
+                            className="max-w-32 cursor-pointer truncate rounded bg-foreground/6 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground transition-colors hover:bg-foreground/12 hover:text-foreground"
+                          >
+                            {activeModelLabel}
+                          </button>
+                        }
                       />
-                    )}
-                  </span>
-                  <div className="flex min-w-0 max-w-52 flex-col gap-0.5">
-                    <div
-                      className={cn(
-                        "truncate leading-tight tracking-tight",
-                        node.status === "completed"
-                          ? "text-xs font-normal text-muted-foreground"
-                          : "text-sm font-medium text-foreground",
-                      )}
+                      <TooltipPopup>
+                        <T>Switch Friday core model</T>
+                      </TooltipPopup>
+                    </Tooltip>
+                  </div>
+                  <div className="text-xs leading-relaxed text-muted-foreground">
+                    <T>
+                      Ready across{" "}
+                      <strong className="font-semibold text-foreground">
+                        <Var>{snapshot.projects.length}</Var>
+                      </strong>{" "}
+                      local projects. Send an instruction below to launch your hub.
+                    </T>
+                  </div>
+                  <div className="flex items-center justify-between border-t border-foreground/8 pt-2">
+                    <span className="font-mono text-3xs text-muted-foreground">
+                      <T>
+                        Shift <Var>{snapshot.config.shiftNumber}</Var> · standby
+                      </T>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMemoryDraft(snapshot.memoryMarkdown);
+                        setMemoryModalOpen(true);
+                      }}
+                      className="cursor-pointer rounded px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
                     >
-                      {node.title}
-                    </div>
-                    <div className="truncate font-mono text-3xs text-muted-foreground">
-                      {node.statusDetail}
-                    </div>
+                      <T>Playbook →</T>
+                    </button>
                   </div>
                 </div>
-              );
-            })}
+              ) : null}
+
+              {/* Live Spatial Nodes */}
+              {snapshot.nodes.map((node) => {
+                const pos = resolvedPositions.get(node.id) ?? { x: 0, y: 0 };
+                const visible = isNodeVisible(node);
+                const selected = selectedNodeId === node.id;
+
+                if (node.kind === "core") {
+                  return (
+                    <div
+                      key={node.id}
+                      data-friday-node={node.id}
+                      style={{ left: `${pos.x}px`, top: `${pos.y}px` }}
+                      onPointerEnter={() => setHoveredNodeId(node.id)}
+                      onPointerLeave={() =>
+                        setHoveredNodeId((cur) => (cur === node.id ? null : cur))
+                      }
+                      onPointerDown={(event) => startNodePointer(event, node, pos)}
+                      onPointerMove={(event) => moveNodePointer(event, node)}
+                      onPointerUp={(event) => endNodePointer(event, node)}
+                      onPointerCancel={(event) => endNodePointer(event, node)}
+                      className={cn(
+                        "absolute z-10 flex w-72 -translate-x-1/2 -translate-y-1/2 cursor-pointer flex-col gap-2 rounded-2xl border border-border/50 bg-popover px-4 py-3.5 shadow-xl transition-shadow",
+                        selected && "border-foreground/30",
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            aria-hidden
+                            className="inline-flex size-4.5 shrink-0 items-center justify-center rounded-sm bg-foreground text-background"
+                          >
+                            <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor">
+                              <rect x="1" y="1" width="4" height="4" rx="1" />
+                              <rect x="7" y="1" width="4" height="4" rx="1" opacity="0.45" />
+                              <rect x="1" y="7" width="4" height="4" rx="1" opacity="0.45" />
+                              <rect x="7" y="7" width="4" height="4" rx="1" />
+                            </svg>
+                          </span>
+                          <span className="text-sm font-semibold tracking-tight text-foreground">
+                            {node.title}
+                          </span>
+                          {node.status === "running" ? (
+                            <span
+                              aria-hidden
+                              className="size-3 shrink-0 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground"
+                            />
+                          ) : node.status === "failed" ? (
+                            <span
+                              aria-hidden
+                              className="size-2 shrink-0 rounded-full bg-destructive"
+                            />
+                          ) : null}
+                        </div>
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                onClick={() => void handleCycleCoreModel()}
+                                className="max-w-32 cursor-pointer truncate rounded bg-foreground/6 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground transition-colors hover:bg-foreground/12 hover:text-foreground"
+                              >
+                                {node.model}
+                              </button>
+                            }
+                          />
+                          <TooltipPopup>
+                            <T>Switch Friday core model</T>
+                          </TooltipPopup>
+                        </Tooltip>
+                      </div>
+
+                      <div className="text-xs text-muted-foreground">
+                        {node.status === "running" ? (
+                          <T>Friday is thinking…</T>
+                        ) : node.status === "failed" ? (
+                          <T>Last turn failed · click to inspect</T>
+                        ) : needsHumanCount > 0 ? (
+                          <T>
+                            <strong className="font-semibold text-foreground">
+                              <Var>{activeCount}</Var>
+                            </strong>{" "}
+                            active ·{" "}
+                            <strong className="font-semibold text-foreground">
+                              <Var>{needsHumanCount}</Var>
+                            </strong>{" "}
+                            needs you
+                          </T>
+                        ) : (
+                          <T>
+                            <strong className="font-semibold text-foreground">
+                              <Var>{activeCount}</Var>
+                            </strong>{" "}
+                            active · all clear
+                          </T>
+                        )}
+                      </div>
+
+                      {node.latestMessagePreview !== null ? (
+                        <div className="line-clamp-3 rounded-lg bg-foreground/5 px-2.5 py-2 text-xs leading-relaxed text-foreground/85">
+                          {node.latestMessagePreview}
+                        </div>
+                      ) : null}
+
+                      <div className="flex items-center justify-between gap-2 border-t border-foreground/8 pt-2">
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <span className="shrink-0 font-mono text-3xs tabular-nums text-muted-foreground">
+                            <T>
+                              Shift <Var>{snapshot.config.shiftNumber}</Var> ·{" "}
+                              <Var>{coreUsage}</Var>%
+                            </T>
+                          </span>
+                          <span className="block h-0.5 flex-1 overflow-hidden rounded-full bg-foreground/10">
+                            <span
+                              className={cn(
+                                "block h-full rounded-full transition-[width]",
+                                coreUsage >= 65 ? "bg-warning" : "bg-foreground/65",
+                              )}
+                              style={{ width: `${Math.min(100, Math.max(4, coreUsage))}%` }}
+                            />
+                          </span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSelectedNodeId((current) => (current === node.id ? null : node.id))
+                            }
+                            className="cursor-pointer rounded px-1.5 py-0.5 text-2xs font-medium text-foreground/80 transition-colors hover:bg-foreground/8 hover:text-foreground"
+                          >
+                            {selected ? <T>Hide</T> : <T>Chat →</T>}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRolloverModalOpen(true)}
+                            className="cursor-pointer rounded px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+                          >
+                            <T>Shift →</T>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (node.kind === "reviewer") {
+                  const dotClass =
+                    node.status === "needs_human"
+                      ? "bg-destructive"
+                      : node.status === "completed"
+                        ? "bg-success"
+                        : "bg-warning";
+                  return (
+                    <div
+                      key={node.id}
+                      data-friday-node={node.id}
+                      style={{ left: `${pos.x}px`, top: `${pos.y}px` }}
+                      onPointerEnter={() => setHoveredNodeId(node.id)}
+                      onPointerLeave={() =>
+                        setHoveredNodeId((cur) => (cur === node.id ? null : cur))
+                      }
+                      onPointerDown={(event) => startNodePointer(event, node, pos)}
+                      onPointerMove={(event) => moveNodePointer(event, node)}
+                      onPointerUp={(event) => endNodePointer(event, node)}
+                      onPointerCancel={(event) => endNodePointer(event, node)}
+                      className={cn(
+                        "absolute z-5 inline-flex -translate-x-2.5 -translate-y-1/2 cursor-pointer items-center gap-1.5 rounded-md px-2 py-0.5 font-mono text-3xs whitespace-nowrap text-muted-foreground transition-colors hover:bg-foreground/6 hover:text-foreground",
+                        selected && "bg-foreground/8 text-foreground",
+                        !visible && "pointer-events-none opacity-15",
+                      )}
+                    >
+                      <span
+                        aria-hidden
+                        className={cn("size-1.5 shrink-0 rounded-full", dotClass)}
+                      />
+                      <span>
+                        ↳ {node.title} · {node.statusDetail}
+                      </span>
+                    </div>
+                  );
+                }
+
+                if (node.status === "needs_human" && node.pendingDecision !== null) {
+                  const decision = node.pendingDecision;
+                  const isBusy = decidingNodeId === node.id;
+                  return (
+                    <div
+                      key={node.id}
+                      data-friday-node={node.id}
+                      style={{ left: `${pos.x}px`, top: `${pos.y}px` }}
+                      onPointerEnter={() => setHoveredNodeId(node.id)}
+                      onPointerLeave={() =>
+                        setHoveredNodeId((cur) => (cur === node.id ? null : cur))
+                      }
+                      onPointerDown={(event) => startNodePointer(event, node, pos)}
+                      onPointerMove={(event) => moveNodePointer(event, node)}
+                      onPointerUp={(event) => endNodePointer(event, node)}
+                      onPointerCancel={(event) => endNodePointer(event, node)}
+                      className={cn(
+                        "absolute z-10 flex w-60 -translate-x-1/2 -translate-y-1/2 cursor-pointer flex-col gap-1.5 rounded-xl border border-border/50 bg-popover px-3.5 py-3 shadow-lg transition-shadow",
+                        selected && "border-foreground/25",
+                        !visible && "pointer-events-none opacity-15",
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-3xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-1.5 font-semibold text-foreground">
+                          <span aria-hidden className="size-1.5 rounded-full bg-destructive" />
+                          <span className="truncate">{decision.kicker}</span>
+                        </span>
+                        <span className="truncate font-mono">{node.projectTitle}</span>
+                      </div>
+                      <div className="truncate text-sm font-semibold tracking-tight text-foreground">
+                        {node.title}
+                      </div>
+                      <div className="line-clamp-2 text-2xs leading-snug text-muted-foreground">
+                        {decision.question}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {decision.options.length > 0 ? (
+                          decision.options.map((option, index) => (
+                            <button
+                              key={option.id}
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handleInlineDecision(node, option)}
+                              className={cn(
+                                "cursor-pointer rounded-md px-2.5 py-1 text-2xs font-medium transition-opacity disabled:opacity-50",
+                                index === 0
+                                  ? "bg-foreground text-background hover:opacity-85"
+                                  : "bg-foreground/8 text-foreground hover:bg-foreground/14",
+                              )}
+                            >
+                              {option.label}
+                            </button>
+                          ))
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedNodeId(node.id)}
+                            className="cursor-pointer rounded-md bg-foreground px-2.5 py-1 text-2xs font-medium text-background transition-opacity hover:opacity-85"
+                          >
+                            <T>Answer →</T>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Calm borderless ambient stream node (running / reviewing / completed / failed)
+                const alignLeft = pos.x < -12;
+                return (
+                  <div
+                    key={node.id}
+                    data-friday-node={node.id}
+                    style={{
+                      left: `${pos.x}px`,
+                      top: `${pos.y}px`,
+                      transform: alignLeft
+                        ? "translate(calc(-100% + 16px), -50%)"
+                        : "translate(-16px, -50%)",
+                    }}
+                    onPointerEnter={() => setHoveredNodeId(node.id)}
+                    onPointerLeave={() => setHoveredNodeId((cur) => (cur === node.id ? null : cur))}
+                    onPointerDown={(event) => startNodePointer(event, node, pos)}
+                    onPointerMove={(event) => moveNodePointer(event, node)}
+                    onPointerUp={(event) => endNodePointer(event, node)}
+                    onPointerCancel={(event) => endNodePointer(event, node)}
+                    className={cn(
+                      "absolute z-5 flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-foreground/5",
+                      alignLeft && "flex-row-reverse text-right",
+                      selected && "bg-foreground/8",
+                      !visible && "pointer-events-none opacity-15",
+                    )}
+                  >
+                    <span className="relative z-10 inline-flex h-4.5 w-3.5 shrink-0 items-center justify-center">
+                      {node.status === "completed" ? (
+                        <span className="inline-flex size-3.5 items-center justify-center rounded-full bg-background">
+                          <CheckIcon aria-hidden className="size-3 text-success" />
+                        </span>
+                      ) : node.status === "failed" ? (
+                        <span className="size-2 rounded-full bg-destructive" />
+                      ) : (
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "size-3 animate-spin rounded-full border-2 border-foreground/15 bg-background",
+                            node.status === "reviewing"
+                              ? "border-t-warning"
+                              : "border-t-foreground",
+                          )}
+                        />
+                      )}
+                    </span>
+                    <div className="flex min-w-0 max-w-52 flex-col gap-0.5">
+                      <div
+                        className={cn(
+                          "truncate leading-tight tracking-tight",
+                          node.status === "completed"
+                            ? "text-xs font-normal text-muted-foreground"
+                            : "text-sm font-medium text-foreground",
+                        )}
+                      >
+                        {node.title}
+                      </div>
+                      <div className="truncate font-mono text-3xs text-muted-foreground">
+                        {node.statusDetail}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {/* Quiet Monochrome Zoom Controls (Desktop) */}
-          <div className="absolute bottom-4 left-4 z-15 hidden items-center gap-0.5 sm:inline-flex">
+          <div className="absolute bottom-4 left-4 z-15 hidden items-center gap-0.5 [-webkit-app-region:no-drag] sm:inline-flex">
             <button
               type="button"
               aria-label={gt("Zoom out")}
-              onClick={() =>
+              onClick={() => {
+                userAdjustedCameraRef.current = true;
                 setCamera((current) => ({
                   ...current,
                   scale: Math.max(0.45, current.scale * 0.87),
-                }))
-              }
+                }));
+              }}
               className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/7 hover:text-foreground"
             >
               <MinusIcon aria-hidden className="size-3.5" />
@@ -1020,12 +1182,13 @@ export function FridayCanvasPage() {
             <button
               type="button"
               aria-label={gt("Zoom in")}
-              onClick={() =>
+              onClick={() => {
+                userAdjustedCameraRef.current = true;
                 setCamera((current) => ({
                   ...current,
                   scale: Math.min(1.6, current.scale * 1.15),
-                }))
-              }
+                }));
+              }}
               className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/7 hover:text-foreground"
             >
               <PlusIcon aria-hidden className="size-3.5" />
@@ -1053,7 +1216,7 @@ export function FridayCanvasPage() {
 
           {/* Floating Bottom T3-Native Matte Composer (hidden while right drawer composer is open) */}
           {selectedNode === null ? (
-            <div className="absolute bottom-3.5 left-1/2 z-20 flex w-full max-w-lg -translate-x-1/2 flex-col items-center gap-1.5 px-3">
+            <div className="absolute bottom-3.5 left-1/2 z-20 flex w-full max-w-lg -translate-x-1/2 flex-col items-center gap-1.5 px-3 [-webkit-app-region:no-drag]">
               {quickSuggestions.length > 0 && workers.length === 0 ? (
                 <div className="hidden flex-wrap justify-center gap-3 sm:flex">
                   {quickSuggestions.map((item) => (
@@ -1098,7 +1261,7 @@ export function FridayCanvasPage() {
 
           {/* Classic List Overlay */}
           {classicListOpen ? (
-            <div className="scrollbar-gutter-both absolute inset-0 z-25 overflow-y-auto bg-background px-5 py-4">
+            <div className="scrollbar-gutter-both absolute inset-0 z-25 overflow-y-auto bg-background px-5 py-4 [-webkit-app-region:no-drag]">
               <div className="mx-auto flex max-w-2xl flex-col gap-1">
                 {snapshot.nodes.length === 0 ? (
                   <div className="py-12 text-center text-xs text-muted-foreground">
@@ -1174,7 +1337,12 @@ export function FridayCanvasPage() {
 
           {/* Soft Rollover Modal (Option B: Same-Thread freshContext) */}
           {rolloverModalOpen ? (
-            <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/75 p-4">
+            <div
+              onClick={(event) => {
+                if (event.target === event.currentTarget) setRolloverModalOpen(false);
+              }}
+              className="absolute inset-0 z-40 flex items-center justify-center bg-background/75 p-4 [-webkit-app-region:no-drag]"
+            >
               <div className="flex w-full max-w-md flex-col gap-3 rounded-2xl border border-border/60 bg-popover p-5 shadow-2xl">
                 <div>
                   <h3 className="text-sm font-semibold tracking-tight text-foreground">
@@ -1232,7 +1400,12 @@ export function FridayCanvasPage() {
 
           {/* FRIDAY.md White-Box Editor Modal */}
           {memoryModalOpen ? (
-            <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/75 p-4">
+            <div
+              onClick={(event) => {
+                if (event.target === event.currentTarget) setMemoryModalOpen(false);
+              }}
+              className="absolute inset-0 z-40 flex items-center justify-center bg-background/75 p-4 [-webkit-app-region:no-drag]"
+            >
               <div className="flex w-full max-w-lg flex-col gap-3 rounded-2xl border border-border/60 bg-popover p-5 shadow-2xl">
                 <div>
                   <h3 className="font-mono text-sm font-semibold text-foreground">

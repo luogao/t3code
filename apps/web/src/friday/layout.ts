@@ -140,10 +140,10 @@ export function computeEdgeEndpoints(input: {
     const dy = input.targetPos.y - input.sourcePos.y;
     const dx = input.targetPos.x - input.sourcePos.x;
     if (Math.abs(dy) > 40) {
-      ay = input.sourcePos.y + (dy < 0 ? -52 : 52);
-      ax = input.sourcePos.x + Math.max(-72, Math.min(72, dx * 0.24));
+      ay = input.sourcePos.y + (dy < 0 ? -74 : 74);
+      ax = input.sourcePos.x + Math.max(-88, Math.min(88, dx * 0.24));
     } else {
-      ax = input.sourcePos.x + (dx < 0 ? -120 : 120);
+      ax = input.sourcePos.x + (dx < 0 ? -144 : 144);
     }
   } else if (input.sourceNode.status === "needs_human") {
     ay = input.sourcePos.y + (input.targetPos.y < input.sourcePos.y ? -56 : 56);

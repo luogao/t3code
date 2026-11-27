@@ -61,12 +61,22 @@ export function FridayThreadDrawer({
     <aside
       data-side-chat-pane=""
       aria-label={node.title}
-      className="absolute top-2.5 right-2.5 bottom-2.5 z-30 flex w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-border/60 bg-popover shadow-2xl"
+      className="absolute inset-y-2.5 right-2.5 left-2.5 z-30 flex select-text flex-col overflow-hidden rounded-2xl border border-border/60 bg-popover shadow-2xl [-webkit-app-region:no-drag] sm:left-auto sm:w-full sm:max-w-xl"
     >
       <div className="flex shrink-0 items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold tracking-tight text-foreground">
-            {node.title}
+          <div className="flex items-center gap-2">
+            {node.status === "running" || node.status === "reviewing" ? (
+              <span
+                aria-hidden
+                className="size-3 shrink-0 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground"
+              />
+            ) : node.status === "needs_human" || node.status === "failed" ? (
+              <span aria-hidden className="size-2 shrink-0 rounded-full bg-destructive" />
+            ) : null}
+            <div className="truncate text-sm font-semibold tracking-tight text-foreground">
+              {node.title}
+            </div>
           </div>
           <div className="mt-0.5 truncate font-mono text-2xs text-muted-foreground">
             {node.projectTitle} · {node.providerInstanceId} · {node.model}
